@@ -63,9 +63,11 @@ class WindowCaptureScreenshots {
             BackgroundWork.screenshotsQueue.addOperation {
                 cachedSCWindows.withLock { $0 = shareableContent.windows }
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                // O(N) 一次性建 wid→SCWindow 索引，下方循环 O(1) 查询；保留首个匹配以等价 first { ... } 语义
+                let scWindowsByWid = Dictionary(shareableContent.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
                 for notCachedWindow in notCachedWindows {
                     guard let request = requests[notCachedWindow] else { continue }
-                    if let cachedWindow = (shareableContent.windows.first { $0.windowID == notCachedWindow }) {
+                    if let cachedWindow = scWindowsByWid[notCachedWindow] {
                         oneTimeCapture(cachedWindow, request, source, prioritized.contains(notCachedWindow))
                     } else {
                         Logger.debug { "wid:\(notCachedWindow) was not found in SCShareableContent windows" }
@@ -76,18 +78,19 @@ class WindowCaptureScreenshots {
     }
 
     private static func sortCachedAndNotCached(_ windows: [CGWindowID]) -> ([SCWindow], [CGWindowID]) {
-        return cachedSCWindows.withLock { cache in
-            var cachedWindows = [SCWindow]()
-            var notCachedWindows = [CGWindowID]()
-            for window in windows {
-                if let cachedWindow = (cache.first { $0.windowID == window }) {
-                    cachedWindows.append(cachedWindow)
-                } else {
-                    notCachedWindows.append(window)
-                }
+        // 锁内只做 O(1) 的 Array COW 快照，立刻释放锁；O(N) 的 dict 构建和 O(M) 查询放锁外，避免阻塞其它截图回调写 cache
+        let snapshot = cachedSCWindows.withLock { $0 }
+        let scWindowsByWid = Dictionary(snapshot.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
+        var cachedWindows = [SCWindow]()
+        var notCachedWindows = [CGWindowID]()
+        for window in windows {
+            if let cachedWindow = scWindowsByWid[window] {
+                cachedWindows.append(cachedWindow)
+            } else {
+                notCachedWindows.append(window)
             }
-            return (cachedWindows, notCachedWindows)
         }
+        return (cachedWindows, notCachedWindows)
     }
 
     private static func oneTimeCapture(_ scWindow: SCWindow, _ request: CaptureRequest, _ source: RefreshCausedBy, _ isPrioritized: Bool = false) {

@@ -3,6 +3,8 @@ import ApplicationServices
 
 class Applications {
     static var list = [Application]()
+    // O(1) pid lookup for findOrCreate; mirrors `list` 1:1, maintained at every list mutation
+    private(set) static var byPid = [pid_t: Application]()
     static var frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     // Layer 0: global throttle on manuallyRefreshAllWindows (panel show full-sync)
     static let manualRefreshThrottler = Throttler(delayInMs: 1000)
@@ -202,6 +204,8 @@ class Applications {
             // thread runloop forever (leak #1).
             for app in list where app.runningApplication.isEqual(tApp) {
                 app.releaseAxObserver()
+                // drop byPid entry before list mutation, so a recycled pid never resolves to a dead Application
+                byPid.removeValue(forKey: app.pid)
             }
             // comparing pid here can fail here, as it can be already nil; we use isEqual here to avoid the issue
             list.removeAll { $0.runningApplication.isEqual(tApp) }
@@ -257,7 +261,7 @@ class Applications {
 
     @discardableResult
     static func findOrCreate(_ pid: pid_t, _ needToVerifyFrontmostPid: Bool) -> Application? {
-        if let app = (list.first { $0.pid == pid }) {
+        if let app = byPid[pid] {
             return app
         }
         guard let runningApp = NSRunningApplication(processIdentifier: pid) else {
@@ -269,6 +273,7 @@ class Applications {
         }
         let app = Application(runningApp)
         list.append(app)
+        byPid[pid] = app
         return app
     }
 

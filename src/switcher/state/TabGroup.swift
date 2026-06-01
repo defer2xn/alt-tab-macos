@@ -10,19 +10,20 @@ class TabGroup {
     /// Find the active tab (non-isTabbed) sibling in the same tab group.
     static func activeTabSibling(of window: Window) -> Window? {
         guard let siblingWids = window.tabbedSiblingWids else { return nil }
-        return Windows.list.first { sibling in
-            sibling !== window && !sibling.isTabbed
-                && sibling.cgWindowId != nil && siblingWids.contains(sibling.cgWindowId!)
+        for wid in siblingWids {
+            guard let sibling = Windows.byWindowId[wid] else { continue }
+            if sibling !== window && !sibling.isTabbed && sibling.cgWindowId != nil {
+                return sibling
+            }
         }
+        return nil
     }
 
     /// When a window is removed from the list, update its former siblings' tab group.
     /// If only 1 sibling remains, clear its tab state (a single window can't be tabbed).
     static func removedWindowFromGroup(wid: CGWindowID?, siblingWids: [CGWindowID]) {
         let remainingWids = siblingWids.filter { $0 != wid }
-        let remainingSiblings = Windows.list.filter { w in
-            w.cgWindowId != nil && remainingWids.contains(w.cgWindowId!)
-        }
+        let remainingSiblings = remainingWids.compactMap { Windows.byWindowId[$0] }
         if remainingSiblings.count <= 1 {
             // no longer a tab group
             for s in remainingSiblings {
@@ -52,8 +53,9 @@ class TabGroup {
             if !activeTab.isTabbed, let oldSiblings = activeTab.tabbedSiblingWids {
                 let activeWid = activeTab.cgWindowId
                 let remainingWids = oldSiblings.filter { $0 != activeWid }
-                let remainingSiblings = Windows.list.filter { w in
-                    w !== activeTab && w.cgWindowId != nil && remainingWids.contains(w.cgWindowId!)
+                let remainingSiblings = remainingWids.compactMap { wid -> Window? in
+                    guard let w = Windows.byWindowId[wid], w !== activeTab else { return nil }
+                    return w
                 }
                 if remainingSiblings.count <= 1 {
                     for s in remainingSiblings where s.isTabbed || s.tabbedSiblingWids != nil {
