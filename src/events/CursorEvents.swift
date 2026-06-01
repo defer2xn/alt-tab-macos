@@ -8,6 +8,10 @@ class CursorEvents {
     private static var mouseDownInsideSearchField = false
     static var deadZoneInitialPosition: CGPoint?
     static var isAllowedToMouseHover = true
+    // 节流 updateHover 这个主线程副作用；CGEvent 本身始终立即透传
+    private static let hoverThrottler = Throttler(delayInMs: 8)
+    // 上次真正触发 updateHover 时的指针位置，用于 <1px 短路
+    private static var lastHoverLocation: CGPoint?
 
     static func observe() {
         observe_()
@@ -18,6 +22,7 @@ class CursorEvents {
         shouldBeEnabled = enabled
         if !enabled {
             deadZoneInitialPosition = nil
+            lastHoverLocation = nil
         }
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: enabled)
@@ -129,9 +134,14 @@ class CursorEvents {
     }
 
     private static func handleMouseMoved(_ cgEvent: CGEvent) -> Unmanaged<CGEvent>? {
-        if isAllowedToReactToPointerMovement(cgEvent.location) {
-            TilesView.thumbnailOverView.updateHover()
+        let location = cgEvent.location
+        // deadzone 状态机必须每次都喂坐标累计位移；不能被短路跳过
+        guard isAllowedToReactToPointerMovement(location) else { return Unmanaged.passUnretained(cgEvent) }
+        if let last = lastHoverLocation, abs(location.x - last.x) < 1, abs(location.y - last.y) < 1 {
+            return Unmanaged.passUnretained(cgEvent)
         }
+        lastHoverLocation = location
+        hoverThrottler.throttleOrProceed { TilesView.thumbnailOverView.updateHover() }
         return Unmanaged.passUnretained(cgEvent)
     }
 

@@ -3,6 +3,12 @@ import Cocoa
 class TileTitleView: NSTextField {
     static let searchHighlightBackgroundKey = NSAttributedString.Key("tileSearchHighlightBackground")
     private var currentWidth: CGFloat = -1
+    // 每帧最多 20 个 tile 绘制，原实现每次 draw 都新建一整套 Cocoa 文本布局栈
+    // (NSTextStorage/NSLayoutManager/NSTextContainer)——这是文本渲染里最贵的对象。
+    // 这里改为每个实例复用同一套，draw 里只 setAttributedString + 按需调 size。
+    private let highlightTextStorage = NSTextStorage()
+    private let highlightLayoutManager = NSLayoutManager()
+    private let highlightTextContainer = NSTextContainer(size: .zero)
 
     // we set their size manually; override this to remove wasteful appkit-side work
     override var intrinsicContentSize: NSSize {
@@ -41,6 +47,11 @@ class TileTitleView: NSTextField {
         textColor = Appearance.fontColor
         lineBreakMode = .byTruncatingTail
         allowsDefaultTighteningForTruncation = false
+        highlightTextContainer.lineFragmentPadding = 0
+        highlightTextContainer.maximumNumberOfLines = 1
+        highlightTextContainer.lineBreakMode = .byClipping
+        highlightLayoutManager.addTextContainer(highlightTextContainer)
+        highlightTextStorage.addLayoutManager(highlightLayoutManager)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -88,20 +99,18 @@ class TileTitleView: NSTextField {
         guard hasHighlights else { return }
         let textRect = cell?.drawingRect(forBounds: bounds) ?? bounds
         guard textRect.width > 0, textRect.height > 0 else { return }
-        let storage = NSTextStorage(attributedString: attributed)
-        let layout = NSLayoutManager()
-        let container = NSTextContainer(size: textRect.size)
-        container.lineFragmentPadding = 0
-        container.maximumNumberOfLines = 1
-        container.lineBreakMode = .byClipping
-        layout.addTextContainer(container)
-        storage.addLayoutManager(layout)
-        layout.ensureLayout(for: container)
+        // 复用实例字段而不是每帧重建：先重置内容，再按需更新容器尺寸，最后 ensureLayout，
+        // 保证后面 boundingRect 取到的是当前内容/尺寸下的最新 glyph 布局。
+        highlightTextStorage.setAttributedString(attributed)
+        if highlightTextContainer.size != textRect.size {
+            highlightTextContainer.size = textRect.size
+        }
+        highlightLayoutManager.ensureLayout(for: highlightTextContainer)
         attributed.enumerateAttribute(Self.searchHighlightBackgroundKey, in: NSRange(location: 0, length: attributed.length)) { value, range, _ in
             guard let color = value as? NSColor else { return }
-            let glyphRange = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let glyphRange = highlightLayoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             guard glyphRange.length > 0 else { return }
-            let glyphRect = layout.boundingRect(forGlyphRange: glyphRange, in: container)
+            let glyphRect = highlightLayoutManager.boundingRect(forGlyphRange: glyphRange, in: highlightTextContainer)
             guard glyphRect.width > 0, glyphRect.height > 0 else { return }
             var rect = glyphRect
             rect.origin.x += textRect.origin.x + 1.05
