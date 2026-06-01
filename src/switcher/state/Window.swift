@@ -141,8 +141,9 @@ class Window {
     func refreshThumbnail(_ screenshot: CALayerContents) {
         thumbnail = screenshot
         if !SwitcherSession.isActive || !shouldShowTheUser { return }
-        if let position, let size,
-           let view = (TilesView.recycledViews.first { $0.window_?.cgWindowId == cgWindowId }) {
+        if let position, let size, let cgWid = cgWindowId,
+           let view = TilesView.widToView[cgWid],
+           view.window_?.cgWindowId == cgWid {
             if !view.thumbnail.isHidden {
                 let thumbnailSize = TileView.thumbnailSize(size, false)
                 let newSize = thumbnailSize.width != view.thumbnail.frame.width || thumbnailSize.height != view.thumbnail.frame.height
@@ -303,7 +304,7 @@ class Window {
             spaceIds = activeTab.spaceIds
         }
         self.spaceIds = spaceIds
-        self.spaceIndexes = spaceIds.compactMap { spaceId in Spaces.idsAndIndexes.first { $0.0 == spaceId }?.1 }
+        self.spaceIndexes = spaceIds.compactMap { Spaces.idToIndex[$0] }
         self.isOnAllSpaces = spaceIds.count > 1
         recomputeIsInvisible()
     }

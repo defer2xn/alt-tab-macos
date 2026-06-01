@@ -4,6 +4,13 @@ class TileView: FlippedView {
     static let noOpenWindowToolTip = NSLocalizedString("App is running but has no open window", comment: "")
     // when calculating the width of a nstextfield, somehow we need to add this suffix to get the correct width
     static let extraTextForPadding = "lmnopqrstuvw"
+    /// Cached `Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex)` for the
+    /// current layout pass; refreshed at every TilesView layout entry. Single value because every
+    /// tile in a panel shares the same active shortcut. Avoids 5–8 dict lookups per tile.
+    static var cachedEffectiveStyle: AppearanceStylePreference = .thumbnails
+    static func refreshCachedEffectiveStyle() {
+        cachedEffectiveStyle = Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex)
+    }
 
     var window_: Window?
     var thumbnail = LightImageLayer()
@@ -49,7 +56,7 @@ class TileView: FlippedView {
     }
 
     private func updateLabelTooltipIfNeeded() {
-        guard Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) != .appIcons else { return }
+        guard TileView.cachedEffectiveStyle != .appIcons else { return }
         label.toolTip = fullTitleWidth >= label.frame.size.width ? fullTitle : nil
     }
 
@@ -61,7 +68,7 @@ class TileView: FlippedView {
     /// The frame used by TileUnderLayer to position the highlight rectangle.
     /// In appIcons style, it covers appIcon + edge insets. Otherwise, it covers the full cell.
     var highlightFrame: CGRect {
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .appIcons {
+        if TileView.cachedEffectiveStyle == .appIcons {
             return CGRect(x: 0, y: 0,
                           width: frame.width, height: appIcon.frame.height + Appearance.edgeInsetsSize * 2)
         }
@@ -69,6 +76,7 @@ class TileView: FlippedView {
     }
 
     func updateRecycledCellWithNewContent(_ element: Window, _ index: Int, _ newHeight: CGFloat) {
+        TilesView.bindWidMapping(view: self, newWid: element.cgWindowId)
         window_ = element
         label.toolTip = nil
         applyCurrentStyle()
@@ -79,7 +87,7 @@ class TileView: FlippedView {
     }
 
     func drawHighlight() {
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .appIcons {
+        if TileView.cachedEffectiveStyle == .appIcons {
             let session = SwitcherSession.current
             let isFocused = indexInRecycledViews == (session?.selectedIndex ?? 0)
             let isHovered = indexInRecycledViews == session?.hoveredIndex
@@ -119,6 +127,7 @@ class TileView: FlippedView {
         let appIconShadow = TileView.makeAppIconShadow(Appearance.imagesShadowColor)
         let thumbnailShadow = TileView.makeThumbnailShadow(Appearance.imagesShadowColor)
         thumbnail.masksToBounds = false // let thumbnail shadows show
+        thumbnail.usesShadowPath = true // 缩略图是不透明矩形，用 shadowPath 消除离屏渲染（图标保留轮廓阴影）
         thumbnail.applyShadow(thumbnailShadow)
         appIcon.applyShadow(appIconShadow)
         dockLabelIcon.shadow = shadow
@@ -170,7 +179,7 @@ class TileView: FlippedView {
     /// `updateRecycledCellWithNewContent` so each summon picks up the active shortcut's override
     /// without forcing a full `TilesView.reset()` (which would recreate all 20 recycled tiles).
     func applyCurrentStyle() {
-        let style = Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex)
+        let style = TileView.cachedEffectiveStyle
         thumbnail.isHidden = Appearance.hideThumbnails
         statusIcons.isHidden = style == .appIcons
         label.alignment = style == .appIcons ? .center : .natural
@@ -302,12 +311,11 @@ class TileView: FlippedView {
     }
 
     private func applySearchHighlight() {
-        let attributes = baseTitleAttributes()
         let query = Search.normalizedQuery(SwitcherSession.current?.searchQuery ?? "")
         let hasAppMatch = !(window_?.swAppResults.isEmpty ?? true)
         appIconHighlight.isHidden = query.isEmpty || !hasAppMatch
         if !appIconHighlight.isHidden {
-            if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .appIcons {
+            if TileView.cachedEffectiveStyle == .appIcons {
                 // match the blue focus outline's visual curvature: same cornerRadius/height ratio,
                 // applied to our smaller rect (the blue outline uses highlightFrame, which is taller).
                 let rect = appIcon.frame.insetBy(dx: -2, dy: -2)
@@ -324,8 +332,10 @@ class TileView: FlippedView {
             }
             appIconHighlight.backgroundColor = Appearance.searchMatchHighlightColor.cgColor
         }
+        // No query → skip the attributed-string highlight path entirely; let cell attributes render.
+        // Set stringValue unconditionally to drop any prior attributedStringValue rich runs.
         if query.isEmpty {
-            label.attributedStringValue = NSAttributedString(string: fullTitle, attributes: attributes)
+            label.stringValue = fullTitle
             return
         }
         let clippingAttributes = baseTitleAttributes(true)
@@ -499,7 +509,7 @@ class TileView: FlippedView {
 
     private func updateSizes(_ newHeight: CGFloat) {
         setFrameWidthHeight(newHeight)
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) != .appIcons {
+        if TileView.cachedEffectiveStyle != .appIcons {
             let hWidth = frame.width - Appearance.edgeInsetsSize * 2
             let labelWidth = hWidth - appIcon.frame.width - Appearance.appIconLabelSpacing - statusIcons.totalWidth
             label.setWidth(labelWidth)
@@ -509,7 +519,8 @@ class TileView: FlippedView {
     private func updatePositions(_ newHeight: CGFloat) {
         let edgeInsets = Appearance.edgeInsetsSize
         assignIfDifferent(&appIcon.frame.origin, NSPoint(x: edgeInsets, y: edgeInsets))
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) != .appIcons {
+        let style = TileView.cachedEffectiveStyle
+        if style != .appIcons {
             let hWidth = frame.width - edgeInsets * 2
             let hHeight = max(appIcon.frame.height, TilesView.layoutCache.labelHeight)
             if App.shared.userInterfaceLayoutDirection == .rightToLeft {
@@ -526,7 +537,7 @@ class TileView: FlippedView {
             assignIfDifferent(&label.frame.origin.x, labelX)
             assignIfDifferent(&label.frame.origin.y, edgeInsets + ((hHeight - TilesView.layoutCache.labelHeight) / 2).rounded())
         }
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .thumbnails {
+        if style == .thumbnails {
             let hHeight = max(appIcon.frame.height, TilesView.layoutCache.labelHeight)
             assignIfDifferent(&thumbnail.frame.origin, NSPoint(x: edgeInsets, y: edgeInsets + hHeight + Appearance.intraCellPadding))
             thumbnail.centerInSuperlayer(x: true)
@@ -537,7 +548,7 @@ class TileView: FlippedView {
 
     private func updateDockLabelIconPosition() {
         let iconSize = max(appIcon.frame.width, appIcon.frame.height)
-        let offset = (iconSize * (Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .appIcons && Appearance.resolvedSize == .large ? 0.03 : 0.05)).rounded()
+        let offset = (iconSize * (TileView.cachedEffectiveStyle == .appIcons && Appearance.resolvedSize == .large ? 0.03 : 0.05)).rounded()
         let badgeTopRightX = appIcon.frame.maxX + offset
         let badgeTopRightY = appIcon.frame.minY - offset
         assignIfDifferent(&dockLabelIcon.frame.origin.x, badgeTopRightX - dockLabelIcon.frame.width)
@@ -552,15 +563,16 @@ class TileView: FlippedView {
     }
 
     private func windowlessIndicatorXPosition() -> CGFloat {
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .thumbnails {
+        if TileView.cachedEffectiveStyle == .thumbnails {
             return thumbnail.frame.origin.x + ((thumbnail.frame.width - windowlessAppIndicator.frame.width) / 2).rounded()
         }
         return (appIcon.frame.midX - windowlessAppIndicator.frame.width / 2).rounded()
     }
 
     private func windowlessIndicatorYPosition() -> CGFloat {
-        let verticalOffset = Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles ? CGFloat(5) : CGFloat(10)
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .thumbnails {
+        let style = TileView.cachedEffectiveStyle
+        let verticalOffset = style == .titles ? CGFloat(5) : CGFloat(10)
+        if style == .thumbnails {
             return (thumbnail.frame.maxY - windowlessAppIndicator.frame.height + verticalOffset).rounded()
         }
         return (appIcon.frame.maxY - windowlessAppIndicator.frame.height + verticalOffset).rounded()
@@ -579,10 +591,11 @@ class TileView: FlippedView {
 
     private func setFrameWidthHeight(_ newHeight: CGFloat) {
         var contentWidth = CGFloat(0)
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .thumbnails {
+        let style = TileView.cachedEffectiveStyle
+        if style == .thumbnails {
             // Preferred to the width of the image, and the minimum width may be set to be large.
             contentWidth = thumbnail.frame.size.width
-        } else if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles {
+        } else if style == .titles {
             contentWidth = TileView.maxThumbnailWidth() - Appearance.edgeInsetsSize * 2
         } else {
             contentWidth = Appearance.iconSize

@@ -25,6 +25,8 @@ class TilesView {
     static var rows = [[TileView]]()
     private static var lastRowSignature = [Int]()
     static var recycledViews = [TileView]()
+    // wid → tile for O(1) screenshot-callback lookup; bound only from layout/recycle paths
+    static var widToView = [CGWindowID: TileView]()
     static var thumbnailsWidth = CGFloat(0.0)
     static var thumbnailsHeight = CGFloat(0.0)
     static var layoutCache = LayoutCache()
@@ -224,6 +226,7 @@ class TilesView {
     }
 
     static func updateCachedSizes() {
+        TileView.refreshCachedEffectiveStyle()
         guard let firstView = TilesView.recycledViews.first else { return }
         layoutCache.labelHeight = firstView.label.cell!.cellSize.height
         let iconCellSize = firstView.statusIcons.iconCellSize
@@ -290,6 +293,7 @@ class TilesView {
         }
         updateBackgroundView()
         TilesPanel.shared.contentView = contentView
+        widToView.removeAll()
         for i in 0..<TilesView.recycledViews.count {
             TilesView.recycledViews[i] = TileView()
         }
@@ -365,6 +369,7 @@ class TilesView {
     }
 
     static func updateItemsAndLayout(_ preservedScrollOrigin: CGPoint?) {
+        TileView.refreshCachedEffectiveStyle()
         var widthMax = TilesPanel.maxThumbnailsWidth().rounded()
         if Preferences.effectiveAppearanceSize(SwitcherSession.activeShortcutIndex) == .auto {
             resolveAutoSize(widthMax)
@@ -419,6 +424,7 @@ class TilesView {
     }
 
     private static func dryRunLayoutTileViews(_ widthMax: CGFloat) -> CGFloat {
+        TileView.refreshCachedEffectiveStyle()
         let labelHeight = Self.layoutCache.labelHeight
         let height = TileView.height(labelHeight)
         let isLeftToRight = App.shared.userInterfaceLayoutDirection == .leftToRight
@@ -462,6 +468,8 @@ class TilesView {
         var rowSignature = [Int]()
         rows.removeAll(keepingCapacity: true)
         rows.append([TileView]())
+        // rebuild wid→tile from this layout pass; sheds dict entries left over from removed windows
+        widToView.removeAll(keepingCapacity: true)
         var index = 0
         while index < TilesView.recycledViews.count {
             guard SwitcherSession.isActive else { return nil }
@@ -496,6 +504,7 @@ class TilesView {
                 // release images and stale window references from unused recycledViews; they take lots of RAM
                 view.thumbnail.releaseImage()
                 view.appIcon.releaseImage()
+                evictWidMapping(for: view)
                 view.window_ = nil
             }
         }
@@ -659,6 +668,20 @@ class TilesView {
             view.needsDisplay = false
             view.needsUpdateConstraints = false
         }
+    }
+
+    /// Bind a wid → tile mapping; evicts the tile's previous wid entry first.
+    /// Skip nil / -1 wids (windowless app / deallocated marker).
+    static func bindWidMapping(view: TileView, newWid: CGWindowID?) {
+        evictWidMapping(for: view)
+        guard let wid = newWid, wid != CGWindowID(bitPattern: -1) else { return }
+        widToView[wid] = view
+    }
+
+    /// Remove this tile from widToView, if currently bound there.
+    static func evictWidMapping(for view: TileView) {
+        guard let oldWid = view.window_?.cgWindowId, oldWid != CGWindowID(bitPattern: -1) else { return }
+        if widToView[oldWid] === view { widToView.removeValue(forKey: oldWid) }
     }
 
     struct LayoutCache {

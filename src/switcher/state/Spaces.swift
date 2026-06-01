@@ -6,6 +6,7 @@ class Spaces {
     static var visibleSpaces = [CGSSpaceID]()
     static var screenSpacesMap = [ScreenUuid: [CGSSpaceID]]()
     static var idsAndIndexes = [(CGSSpaceID, SpaceIndex)]()
+    static var idToIndex = [CGSSpaceID: SpaceIndex]()
 
     static func isSingleSpace() -> Bool {
         return idsAndIndexes.count == 1
@@ -50,6 +51,7 @@ class Spaces {
 
     private static func refreshAllIdsAndIndexes() -> Void {
         idsAndIndexes.removeAll()
+        idToIndex.removeAll()
         screenSpacesMap.removeAll()
         visibleSpaces.removeAll()
         var spaceIndex = SpaceIndex(1)
@@ -61,6 +63,7 @@ class Spaces {
             (screen["Spaces"] as! [NSDictionary]).forEach { (space: NSDictionary) in
                 let spaceId = space["id64"] as! CGSSpaceID
                 idsAndIndexes.append((spaceId, spaceIndex))
+                idToIndex[spaceId] = spaceIndex
                 screenSpacesMap[display, default: []].append(spaceId)
                 spaceIndex += 1
             }

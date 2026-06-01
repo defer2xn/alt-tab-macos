@@ -97,11 +97,21 @@ extension CALayer {
     }
 
     func applyShadow(_ shadow: NSShadow?) {
-        guard let shadow else { shadowOpacity = 0; return }
+        guard let shadow else { shadowOpacity = 0; shadowPath = nil; return }
         shadowColor = shadow.shadowColor?.cgColor
         shadowOffset = shadow.shadowOffset
         shadowRadius = shadow.shadowBlurRadius
         shadowOpacity = 1.0
+    }
+
+    // 显式 shadowPath 避免 Core Animation 为推导阴影形状对 layer 内容做 alpha 分析（离屏渲染）
+    func updateShadowPathIfNeeded() {
+        guard shadowOpacity > 0, bounds.width > 0, bounds.height > 0 else { return }
+        if cornerRadius > 0 {
+            shadowPath = CGPath(roundedRect: bounds, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+        } else {
+            shadowPath = CGPath(rect: bounds, transform: nil)
+        }
     }
 }
 
