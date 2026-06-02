@@ -728,6 +728,46 @@ class TileView: FlippedView {
         return maxWidth
     }
 
+    /// Longest effective tile-title width across windows passing the *current* search/visibility
+    /// filter (Windows.shouldDisplay). Mirrors getAppOrAndWindowTitle()'s mode logic so the
+    /// measurement matches what a row will actually render. Returns nil when no window matches
+    /// (e.g. empty search) so the caller can fall back to a floor width.
+    static func widthOfLongestVisibleTitle() -> CGFloat? {
+        let labTitleView = TileTitleView(font: Appearance.font)
+        let mode = Preferences.showTitles
+        let onlyApps = Preferences.onlyShowApplications()
+        var maxWidth = CGFloat(0)
+        for window in Windows.list {
+            guard Windows.shouldDisplay(window) else { continue }
+            let appName = window.application.localizedName ?? ""
+            let title = window.title ?? ""
+            let display: String
+            if onlyApps || mode == .appName {
+                display = appName
+            } else if mode == .appNameAndWindowTitle {
+                display = [appName.isEmpty ? nil : appName, title.isEmpty ? nil : title]
+                    .compactMap { $0 }.joined(separator: " - ")
+            } else {
+                display = title
+            }
+            if display.isEmpty { continue }
+            labTitleView.stringValue = display + extraTextForPadding
+            let width = labTitleView.cell!.cellSize.width
+            if width > maxWidth { maxWidth = width }
+        }
+        return maxWidth > 0 ? maxWidth : nil
+    }
+
+    /// Worst-case status-icons strip width for any row in the current visible batch. Used by the
+    /// titles-style content-fit width calculation. Conservative: assumes any window in the batch
+    /// may show 4 status icons (space + hidden + fullscreen + minimized). The over-estimate is
+    /// at most ~3 × iconCellSize.width (~30pt at fontHeight=16) which sits inside the centerRows
+    /// cushion and avoids replicating the showSpace eligibility predicate from updateValues().
+    static func maxStatusIconsWidthForVisibleBatch() -> CGFloat {
+        guard Windows.list.contains(where: { Windows.shouldDisplay($0) }) else { return 0 }
+        return CGFloat(4) * TilesView.layoutCache.iconWidth
+    }
+
     static func minThumbnailWidth(_ screen: NSScreen = NSScreen.preferred) -> CGFloat {
         return TilesPanel.maxThumbnailsWidth(screen) * Appearance.windowMinWidthInRow - Appearance.interCellPadding * 2
     }

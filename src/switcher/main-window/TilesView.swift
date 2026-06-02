@@ -233,9 +233,22 @@ class TilesView {
         layoutCache.iconWidth = iconCellSize.width
         layoutCache.iconHeight = iconCellSize.height
         layoutCache.comfortableReadabilityWidth = TileView.widthOfComfortableReadability()
+        refreshTitlesContentWidthCache()
         TileFontIconView.symbolCache.removeAll()
         let spaceNumberStrings = (0...19).map { StatusIconsView.symbolForSpace($0) }
         TileFontIconView.warmCaches(symbols: [.circledPlusSign, .circledMinusSign, .circledSlashSign, .circledStar], extraStrings: spaceNumberStrings, size: Appearance.fontHeight, color: Appearance.fontColor)
+    }
+
+    /// Recompute the titles-style content-fit inputs from the current visible window batch.
+    /// Skipped for non-titles styles (other styles ignore these cache fields).
+    static func refreshTitlesContentWidthCache() {
+        guard TileView.cachedEffectiveStyle == .titles else {
+            layoutCache.longestVisibleTitleWidth = nil
+            layoutCache.maxStatusIconsWidth = 0
+            return
+        }
+        layoutCache.longestVisibleTitleWidth = TileView.widthOfLongestVisibleTitle()
+        layoutCache.maxStatusIconsWidth = TileView.maxStatusIconsWidthForVisibleBatch()
     }
 
     static func updateBackgroundView() {
@@ -370,6 +383,8 @@ class TilesView {
 
     static func updateItemsAndLayout(_ preservedScrollOrigin: CGPoint?) {
         TileView.refreshCachedEffectiveStyle()
+        // titles 风格按内容自适应面板宽，必须在 maxThumbnailsWidth() 之前刷新当批最长标题/状态徽标宽度
+        refreshTitlesContentWidthCache()
         var widthMax = TilesPanel.maxThumbnailsWidth().rounded()
         if Preferences.effectiveAppearanceSize(SwitcherSession.activeShortcutIndex) == .auto {
             resolveAutoSize(widthMax)
@@ -689,6 +704,12 @@ class TilesView {
         var iconWidth = CGFloat(0)
         var iconHeight = CGFloat(0)
         var comfortableReadabilityWidth: CGFloat?
+        /// Longest effective title width for windows currently passing Windows.shouldDisplay.
+        /// Refreshed at every updateItemsAndLayout entry and once per resolveAutoSize iteration
+        /// (font/iconSize change between size buckets). Drives the titles-style panel width.
+        var longestVisibleTitleWidth: CGFloat?
+        /// Max status-icons strip width across the visible batch; refreshed alongside longestVisibleTitleWidth.
+        var maxStatusIconsWidth: CGFloat = 0
     }
 
     

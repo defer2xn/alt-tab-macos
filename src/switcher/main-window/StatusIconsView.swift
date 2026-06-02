@@ -123,6 +123,18 @@ class StatusIconsView: FlippedView {
         let iconHeight = TilesView.layoutCache.iconHeight
         let isLTR = App.shared.userInterfaceLayoutDirection == .leftToRight
         let yOffset = ((frame.height - iconHeight) / 2).rounded()
+        // 药丸底：仅 titles 风格画（appIcons 整个 statusIcons 隐藏；thumbnails 上不画以保留缩略图视觉重心）。
+        // 走 labelColor 透明，自动适配浅深色；轻量 0.08 让"Space 号"看起来是个 chip 而不是孤立字符。
+        if TileView.cachedEffectiveStyle == .titles {
+            let h = max(iconHeight, frame.height) - 2
+            let pillW = CGFloat(visibleCount) * iconWidth
+            let pillX = isLTR ? frame.width - pillW : 0
+            let pillY = ((frame.height - h) / 2).rounded()
+            let bounds = NSRect(x: pillX, y: pillY, width: pillW, height: h)
+            let path = NSBezierPath(roundedRect: bounds, xRadius: h / 2, yRadius: h / 2)
+            NSColor.labelColor.withAlphaComponent(0.08).setFill()
+            path.fill()
+        }
         var offset = CGFloat(0)
         for icon in icons {
             guard icon.visible else { continue }

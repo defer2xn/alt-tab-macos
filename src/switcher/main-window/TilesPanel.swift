@@ -97,19 +97,24 @@ class TilesPanel: NSPanel {
     }
 
     static func maxThumbnailsWidth(_ screen: NSScreen = NSScreen.preferred) -> CGFloat {
-        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles,
-           let readableWidth = TilesView.layoutCache.comfortableReadabilityWidth {
-            // titles 风格的绝对软上限：大屏上面板内容宽不超过 880pt，避免被撑成屏宽 90%；
-            // 880 足够容纳绝大多数窗口标题（约 90+ 等宽字符），少数超长标题走 truncation。
+        if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles {
+            // titles 风格按当前可见窗口的最长标题做内容自适应；其它风格保持屏宽比例。
+            // 上限三选最小：屏宽比例、880pt 软上限；下限保证极短列表不至于细长难看。
             let titlesSoftCap = CGFloat(880)
-            return (
-                min(
-                    screen.frame.width * Appearance.maxWidthOnScreen,
-                    readableWidth + Appearance.intraCellPadding * 2 + Appearance.appIconLabelSpacing + Appearance.iconSize,
-                    titlesSoftCap
-                    // widthOfLongestTitle + Appearance.intraCellPadding * 2 + Appearance.appIconLabelSpacing + Appearance.iconSize
-                ) - Appearance.windowPadding * 2
-            ).rounded()
+            let screenCap = (screen.frame.width * Appearance.maxWidthOnScreen - Appearance.windowPadding * 2)
+            let upperBound = min(screenCap, titlesSoftCap - Appearance.windowPadding * 2)
+            let lowerBound = CGFloat(380)
+            // 单行所需 frame 宽 = 最长标题 + 左侧图标 + 图标-标题间距 + 右侧状态徽标 + 两侧 edgeInsets。
+            // 不除 windowMaxWidthInRow(0.9)：那个比例是行内 tile 占面板宽的比例；用 (.../0.9) 还原面板宽，
+            // 使 setFrameWidthHeight 计算出的 contentWidth 恰好容纳最长标题，不留多余右侧空白。
+            let titleWidth = TilesView.layoutCache.longestVisibleTitleWidth ?? 0
+            let statusWidth = TilesView.layoutCache.maxStatusIconsWidth
+            let tileFrameNeeded = titleWidth + Appearance.iconSize + Appearance.appIconLabelSpacing
+                + statusWidth + Appearance.edgeInsetsSize * 2
+            let widthRatio = max(Appearance.windowMaxWidthInRow, 0.01)
+            let contentNeeded = (tileFrameNeeded + Appearance.interCellPadding * 2) / widthRatio
+            let clamped = min(max(contentNeeded, lowerBound), upperBound)
+            return clamped.rounded()
         }
         return (screen.frame.width * Appearance.maxWidthOnScreen - Appearance.windowPadding * 2).rounded()
     }
