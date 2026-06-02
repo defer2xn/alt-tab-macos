@@ -19,7 +19,7 @@ class TilesView {
     static var contentView: EffectView!
     static var currentEffectViewKind: EffectViewKind?
     private static var cachedEffectViews: [EffectViewKind: EffectView] = [:]
-    static var searchField = NSSearchField(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
+    static var searchField = SwitcherSearchField(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
     static var noWindowLabel = NSTextField(labelWithString: NSLocalizedString("No Window", comment: ""))
     // 底部操作提示条：仅 titles 风格显示，硬编码简体中文以匹配设计稿
     static var footerView = NSTextField(labelWithString: "↑ ↓  选择        ↵  打开        esc  关闭")
@@ -267,11 +267,7 @@ class TilesView {
         currentEffectViewKind = kind
         scrollView?.removeFromSuperview()
         scrollView = ScrollView()
-        if searchMode != .off {
-            contentView.addSubview(searchField)
-        } else {
-            searchField.removeFromSuperview()
-        }
+        contentView.addSubview(searchField)
         contentView.addSubview(scrollView)
         contentView.addSubview(noWindowLabel)
         contentView.addSubview(footerView)
@@ -283,9 +279,7 @@ class TilesView {
         guard desired != currentEffectViewKind else { return }
         let newView = cachedEffectView(for: desired)
         currentEffectViewKind = desired
-        if searchField.superview === contentView {
-            newView.addSubview(searchField)
-        }
+        newView.addSubview(searchField)
         newView.addSubview(scrollView)
         newView.addSubview(noWindowLabel)
         newView.addSubview(footerView)
@@ -441,7 +435,7 @@ class TilesView {
     }
 
     private static func resolveAutoSize(_ widthMax: CGFloat) {
-        let searchReservedHeight: CGFloat = searchMode == .off ? 0 : searchBarHeight() + 10
+        let searchReservedHeight: CGFloat = searchBarHeight() + 10
         let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReservedHeight())
         for size in [AppearanceSizePreference.large, .medium, .small] {
             Appearance.applySize(size)
@@ -575,7 +569,7 @@ class TilesView {
     private static func layoutParentViews(_ maxX: CGFloat, _ widthMax: CGFloat, _ maxY: CGFloat, _ labelHeight: CGFloat) {
         let searchBarHeight = searchBarHeight()
         let searchBottomPadding = CGFloat(10)
-        let searchReservedHeight = searchMode == .off ? 0 : searchBarHeight + searchBottomPadding
+        let searchReservedHeight = searchBarHeight + searchBottomPadding
         let footerReserved = footerReservedHeight()
         let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReserved)
         let minSearchWidth = min(widthMax, 320)
@@ -597,18 +591,14 @@ class TilesView {
         scrollView.frame.size = NSSize(width: TilesView.thumbnailsWidth, height: scrollHeight)
         scrollView.frame.origin = CGPoint(x: originX, y: originY + appIconsBottomViewportPadding * 2)
         scrollView.contentView.frame.size = scrollView.frame.size
-        if searchMode != .off {
-            if searchField.superview !== contentView {
-                contentView.addSubview(searchField)
-            }
-            let searchWidth = minSearchWidth
-            searchField.frame.size = NSSize(width: searchWidth, height: searchBarHeight)
-            let searchX = originX + (TilesView.thumbnailsWidth - searchWidth) * 0.5
-            searchField.frame.origin = CGPoint(x: searchX, y: frameHeight - Appearance.windowPadding - searchBarHeight)
-            searchField.layoutSubtreeIfNeeded()
-        } else if searchField.superview != nil {
-            searchField.removeFromSuperview()
+        if searchField.superview !== contentView {
+            contentView.addSubview(searchField)
         }
+        let searchWidth = minSearchWidth
+        searchField.frame.size = NSSize(width: searchWidth, height: searchBarHeight)
+        let searchX = originX + (TilesView.thumbnailsWidth - searchWidth) * 0.5
+        searchField.frame.origin = CGPoint(x: searchX, y: frameHeight - Appearance.windowPadding - searchBarHeight)
+        searchField.layoutSubtreeIfNeeded()
         if footerReserved > 0 {
             footerView.isHidden = false
             footerView.frame = CGRect(x: originX, y: Appearance.windowPadding, width: TilesView.thumbnailsWidth, height: footerHeight())
@@ -914,6 +904,16 @@ class TilesDocumentView: FlippedView {
 
 class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// 常驻搜索框：被动态（未聚焦）下点击它即进入搜索（聚焦+锁定面板），否则原生 NSSearchField 不响应点击
+class SwitcherSearchField: NSSearchField {
+    override func mouseDown(with event: NSEvent) {
+        if SwitcherSession.isActive && !TilesView.isSearchEditing {
+            TilesView.enableSearchEditing()
+        }
+        super.mouseDown(with: event)
+    }
 }
 
 

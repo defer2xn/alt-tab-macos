@@ -19,7 +19,7 @@ class TileView: FlippedView {
     var label = TileTitleView(font: Appearance.font)
     var statusIcons = StatusIconsView()
     // titles 风格下前 9 个可见行的右侧用 ⌘N 快捷提示替换状态圆圈；displayIndex 是当前可见序号（0 起）
-    var keyHintBadge = NSTextField(labelWithString: "")
+    var keyHintBadge = KeyHintView()
     var displayIndex = -1
     var dockLabelIcon = TileFontIconView(badgeSize: TileFontIconView.badgeBaseSize(forIconSize: TileView.iconSize().width))
     var windowlessAppIndicator = WindowlessAppIndicator(tooltip: TileView.noOpenWindowToolTip)
@@ -194,15 +194,53 @@ class TileView: FlippedView {
         statusIcons.isHidden = style == .appIcons
         label.alignment = style == .appIcons ? .center : .natural
         label.isHidden = style == .appIcons
+        // titles 风格：label 渲染双行（第一行 app 名、第二行窗口标题），覆盖 showTitles 设置
+        let twoLine = style == .titles
+        label.maximumNumberOfLines = twoLine ? 2 : 1
+        label.usesSingleLineMode = !twoLine
         // recycled tile 可能携带上一帧的"选中提亮色"，先回到基础色；如果当前位置是焦点行，
         // 后续 TilesView.highlight() 会再次 drawHighlight 覆盖回提亮色。
         label.textColor = Appearance.fontColor
     }
 
+    /// 双行标题块高度：titles 风格为第一行 + 较小的第二行；否则单行
+    private func titleBlockHeight() -> CGFloat {
+        let single = TilesView.layoutCache.labelHeight
+        if TileView.cachedEffectiveStyle == .titles {
+            return single + (single * 0.82).rounded()
+        }
+        return single
+    }
+
+    /// titles 风格当前行是否实际渲染两行（无搜索查询 + 有区别于 app 名的窗口标题）。
+    /// 决定 label 内容高度，单行内容在双行行高里垂直居中
+    private func rendersTwoLines() -> Bool {
+        guard TileView.cachedEffectiveStyle == .titles else { return false }
+        guard (SwitcherSession.current?.searchQuery ?? "").isEmpty else { return false }
+        guard let appName = window_?.application.localizedName, !appName.isEmpty else { return false }
+        let title = window_?.title ?? ""
+        return !title.isEmpty && title != appName
+    }
+
+    /// titles 双行富文本：第一行 app 名（appNameFont 加粗），第二行窗口标题（次级灰）。
+    /// 无窗口标题或标题等于 app 名时只返回 app 名一行
+    private func twoLineTitleAttributedString() -> NSAttributedString? {
+        guard let appName = window_?.application.localizedName, !appName.isEmpty else { return nil }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .natural
+        paragraph.baseWritingDirection = .leftToRight
+        paragraph.lineBreakMode = .byTruncatingTail
+        let result = NSMutableAttributedString()
+        result.append(NSAttributedString(string: appName, attributes: [.font: Appearance.appNameFont, .foregroundColor: Appearance.fontColor, .paragraphStyle: paragraph]))
+        let title = window_?.title ?? ""
+        if !title.isEmpty && title != appName {
+            let subtitleFont = NSFont.systemFont(ofSize: (Appearance.fontHeight * 0.82).rounded())
+            result.append(NSAttributedString(string: "\n" + title, attributes: [.font: subtitleFont, .foregroundColor: Appearance.secondaryFontColor, .paragraphStyle: paragraph]))
+        }
+        return result
+    }
+
     private func configureKeyHintBadge() {
-        keyHintBadge.font = NSFont.systemFont(ofSize: (Appearance.fontHeight * 0.82).rounded(), weight: .medium)
-        keyHintBadge.textColor = Appearance.secondaryFontColor
-        keyHintBadge.alignment = .right
         keyHintBadge.isHidden = true
     }
 
@@ -211,34 +249,36 @@ class TileView: FlippedView {
         TileView.cachedEffectiveStyle == .titles && displayIndex >= 0 && displayIndex < 9
     }
 
-    /// 右侧槽位宽度：显示徽标时用徽标宽度，否则用状态图标条宽度
+    private func keyHintText() -> String {
+        "⌘\(displayIndex + 1)"
+    }
+
+    /// 右侧槽位宽度：显示徽标时用 chip 宽度，否则用状态图标条宽度
     private func rightSlotWidth() -> CGFloat {
-        showsKeyHint ? keyHintBadge.frame.width : statusIcons.totalWidth
+        showsKeyHint ? KeyHintView.width(for: keyHintText()) : statusIcons.totalWidth
     }
 
     private func updateKeyHintBadge() {
         let shows = showsKeyHint
         if shows {
-            let text = "⌘\(displayIndex + 1)"
-            if keyHintBadge.stringValue != text {
-                keyHintBadge.stringValue = text
-                keyHintBadge.sizeToFit()
-            }
+            keyHintBadge.setText(keyHintText())
             statusIcons.isHidden = true
         }
         keyHintBadge.isHidden = !shows
     }
 
-    /// 右侧槽位布局：显示徽标时把徽标贴右居中，否则按原逻辑排状态图标
+    /// 右侧槽位布局：显示徽标时把 chip 贴右垂直居中，否则按原逻辑排状态图标
     private func layoutRightSlot(hWidth: CGFloat, hHeight: CGFloat, edgeInsets: CGFloat) {
         guard showsKeyHint else {
             statusIcons.layoutIcons(hWidth: hWidth, hHeight: hHeight, edgeInsets: edgeInsets)
             return
         }
         let isLTR = App.shared.userInterfaceLayoutDirection == .leftToRight
-        let x = isLTR ? edgeInsets + hWidth - keyHintBadge.frame.width : edgeInsets
-        let y = edgeInsets + ((hHeight - keyHintBadge.frame.height) / 2).rounded()
-        assignIfDifferent(&keyHintBadge.frame.origin, NSPoint(x: x, y: y))
+        let w = KeyHintView.width(for: keyHintText())
+        let h = KeyHintView.height()
+        let x = isLTR ? edgeInsets + hWidth - w : edgeInsets
+        let y = edgeInsets + ((hHeight - h) / 2).rounded()
+        keyHintBadge.frame = NSRect(x: x, y: y, width: w, height: h)
     }
 
     private func updateAppIconsLabel(isFocused: Bool, isHovered: Bool) {
@@ -391,6 +431,10 @@ class TileView: FlippedView {
         // No query → skip the attributed-string highlight path entirely; let cell attributes render.
         // Set stringValue unconditionally to drop any prior attributedStringValue rich runs.
         if query.isEmpty {
+            if TileView.cachedEffectiveStyle == .titles, let twoLine = twoLineTitleAttributedString() {
+                label.attributedStringValue = twoLine
+                return
+            }
             if let appNameLen = appNameCharCount() {
                 label.attributedStringValue = layeredTitleAttributedString(appNameLen: appNameLen)
                 return
@@ -628,7 +672,12 @@ class TileView: FlippedView {
         let style = TileView.cachedEffectiveStyle
         if style != .appIcons {
             let hWidth = frame.width - edgeInsets * 2
-            let hHeight = max(appIcon.frame.height, TilesView.layoutCache.labelHeight)
+            let blockHeight = titleBlockHeight()
+            let hHeight = max(appIcon.frame.height, blockHeight)
+            // 双行时图标比文本块矮，垂直居中图标
+            if style == .titles && blockHeight > appIcon.frame.height {
+                assignIfDifferent(&appIcon.frame.origin.y, edgeInsets + ((hHeight - appIcon.frame.height) / 2).rounded())
+            }
             if App.shared.userInterfaceLayoutDirection == .rightToLeft {
                 assignIfDifferent(&appIcon.frame.origin.x, edgeInsets + hWidth - appIcon.frame.width)
             }
@@ -641,7 +690,10 @@ class TileView: FlippedView {
                 labelX = edgeInsets + hWidth - appIcon.frame.width - Appearance.appIconLabelSpacing - labelWidth
             }
             assignIfDifferent(&label.frame.origin.x, labelX)
-            assignIfDifferent(&label.frame.origin.y, edgeInsets + ((hHeight - TilesView.layoutCache.labelHeight) / 2).rounded())
+            // 单行内容（无窗口标题或搜索态）用单行高度并在双行行高里垂直居中；双行内容用满块高
+            let contentHeight = rendersTwoLines() ? blockHeight : TilesView.layoutCache.labelHeight
+            assignIfDifferent(&label.frame.size.height, contentHeight)
+            assignIfDifferent(&label.frame.origin.y, edgeInsets + ((hHeight - contentHeight) / 2).rounded())
         }
         if style == .thumbnails {
             let hHeight = max(appIcon.frame.height, TilesView.layoutCache.labelHeight)
@@ -880,10 +932,51 @@ class TileView: FlippedView {
 
     static func height(_ labelHeight: CGFloat) -> CGFloat {
         if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles {
-            return max(TileView.iconSize().height, labelHeight) + Appearance.edgeInsetsSize * 2
+            let textHeight = labelHeight + (labelHeight * 0.82).rounded()
+            return max(TileView.iconSize().height, textHeight) + Appearance.edgeInsetsSize * 2
         } else if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .appIcons {
             return TileView.iconSize().height + Appearance.edgeInsetsSize * 2 + Appearance.intraCellPadding * 2 + labelHeight
         }
         return TileView.maxThumbnailHeight()
+    }
+}
+
+/// titles 风格右侧的 ⌘N 快捷跳转徽标：自绘圆角底 + 居中文字。
+/// 自绘而非用 NSTextField，因为 tile 子视图被强制 layer-backed（禁动画）后 NSTextField 的文字不渲染。
+class KeyHintView: FlippedView {
+    private var text = ""
+
+    @objc func _windowChangedKeyState() {}
+    @objc func _layoutSubtreeWithOldSize(_ oldSize: NSSize) {}
+
+    override func isAccessibilityElement() -> Bool { false }
+
+    func setText(_ newText: String) {
+        guard text != newText else { return }
+        text = newText
+        needsDisplay = true
+    }
+
+    static func font() -> NSFont {
+        NSFont.systemFont(ofSize: (Appearance.fontHeight * 0.74).rounded(), weight: .medium)
+    }
+
+    /// chip 宽度 = 文字宽度 + 左右内边距
+    static func width(for text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        return ceil((text as NSString).size(withAttributes: [.font: font()]).width) + 14
+    }
+
+    static func height() -> CGFloat {
+        ceil(("⌘8" as NSString).size(withAttributes: [.font: font()]).height) + 6
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !text.isEmpty, bounds.width > 0, bounds.height > 0 else { return }
+        Appearance.fontColor.withAlphaComponent(0.10).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        let str = NSAttributedString(string: text, attributes: [.font: KeyHintView.font(), .foregroundColor: Appearance.secondaryFontColor])
+        let size = str.size()
+        str.draw(at: NSPoint(x: ((bounds.width - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded()))
     }
 }

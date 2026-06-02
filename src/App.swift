@@ -246,6 +246,12 @@ class App: AppCenterApplication {
     }
 
     static func cycleSelection(_ direction: Direction, allowWrap: Bool = true) {
+        // 从顶行（第一行）继续往上/往前（↑ 或 previous）→ 进入搜索框：聚焦并锁定面板（松开 ⌘ 不关闭）
+        if direction == .up || direction == .trailing,
+           !TilesView.isSearchEditing, SwitcherSession.isActive, Windows.selectedWindow()?.rowIndex == 0 {
+            TilesView.enableSearchEditing()
+            return
+        }
         (TilesView.scrollView?.documentView as? TilesDocumentView)?.cancelDraggingTimer()
         CursorEvents.resetDeadzone()
         if direction == .up || direction == .down {
@@ -326,10 +332,10 @@ class App: AppCenterApplication {
             // in its final state. No-op on first summon (panel was orderOut'd with alpha=0).
             TilesPanel.shared.alphaValue = 0
             ProTransitionManager.shared.onSwitcherShown()
-            // 始终进入搜索编辑态：召唤即自动聚焦、打字即筛选；松开是否激活仍由 shortcutStyle 决定
-            let searchOnReleaseStyle = Preferences.effectiveShortcutStyle(shortcutIndex) == .searchOnRelease
-            TilesView.startSearchSession(true)
-            if searchOnReleaseStyle {
+            // 召唤时焦点在列表（不自动聚焦搜索框）；搜索框常驻可见但被动，按 ↑ 从顶行进入搜索
+            let shouldStartInSearchMode = Preferences.effectiveShortcutStyle(shortcutIndex) == .searchOnRelease
+            TilesView.startSearchSession(shouldStartInSearchMode)
+            if shouldStartInSearchMode {
                 session.forceDoNothingOnRelease = true
             }
             if !Windows.updatesBeforeShowing() { hideUi(); return }
