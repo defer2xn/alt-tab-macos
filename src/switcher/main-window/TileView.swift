@@ -87,22 +87,27 @@ class TileView: FlippedView {
     }
 
     func drawHighlight() {
-        guard TileView.cachedEffectiveStyle == .appIcons else { return }
         let session = SwitcherSession.current
         let isFocused = indexInRecycledViews == (session?.selectedIndex ?? 0)
         let isHovered = indexInRecycledViews == session?.hoveredIndex
-        let shouldBeVisible = isFocused || isHovered
-        // Update the frame BEFORE unhiding. `applyCurrentStyle()` already set
-        // `label.isHidden = true` in `updateRecycledCellWithNewContent`; the label's frame is
-        // still at its previous-style position (e.g. right-of-icon from thumbnails). Setting
-        // `isHidden = false` first would briefly reveal the label at the stale position before
-        // `updateAppIconsLabelFrame()` moves it under the icon — that's the "title slides from
-        // right of icon to under the icon" frame the user reported during cross-style summons.
-        if shouldBeVisible {
-            updateAppIconsLabelFrame()
+        if TileView.cachedEffectiveStyle == .appIcons {
+            let shouldBeVisible = isFocused || isHovered
+            // Update the frame BEFORE unhiding. `applyCurrentStyle()` already set
+            // `label.isHidden = true` in `updateRecycledCellWithNewContent`; the label's frame is
+            // still at its previous-style position (e.g. right-of-icon from thumbnails). Setting
+            // `isHidden = false` first would briefly reveal the label at the stale position before
+            // `updateAppIconsLabelFrame()` moves it under the icon — that's the "title slides from
+            // right of icon to under the icon" frame the user reported during cross-style summons.
+            if shouldBeVisible {
+                updateAppIconsLabelFrame()
+            }
+            label.isHidden = !shouldBeVisible
+            updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
+            return
         }
-        label.isHidden = !shouldBeVisible
-        updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
+        // 选中行文字提亮：仅调 textColor 不动字重避免重排。attributed 路径（搜索高亮 / 应用名+标题分层）的
+        // .foregroundColor 会覆盖 textColor，本轮按 spec 不处理这两种路径下的焦点色变。
+        label.textColor = isFocused ? .alternateSelectedControlTextColor : Appearance.fontColor
     }
 
     func updateDockLabelIcon(_ dockLabel: String?) {
@@ -183,6 +188,9 @@ class TileView: FlippedView {
         statusIcons.isHidden = style == .appIcons
         label.alignment = style == .appIcons ? .center : .natural
         label.isHidden = style == .appIcons
+        // recycled tile 可能携带上一帧的"选中提亮色"，先回到基础色；如果当前位置是焦点行，
+        // 后续 TilesView.highlight() 会再次 drawHighlight 覆盖回提亮色。
+        label.textColor = Appearance.fontColor
     }
 
     private func updateAppIconsLabel(isFocused: Bool, isHovered: Bool) {

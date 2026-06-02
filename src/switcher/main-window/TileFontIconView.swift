@@ -67,15 +67,19 @@ class TileFontIconView: NSView {
     }()
 
     private struct BadgeSizing {
-        static let containerFromIconRatio = CGFloat(0.43)
+        // 略微收紧 badge 比例；并加 maxContainerHeight 软上限，避免 dock 红角标在大图标下过于抢眼
+        static let containerFromIconRatio = CGFloat(0.42)
         static let textFromContainerRatio = CGFloat(0.57)
         static let minContainerHeight = CGFloat(11)
+        static let maxContainerHeight = CGFloat(14)
         static let minTextHeight = CGFloat(8)
         static let maxTextHeight = CGFloat(18)
         static let horizontalPaddingRatio = CGFloat(0.10)
         static let minHorizontalPadding = CGFloat(2)
         static let appIconsMinRectWidthRatio = CGFloat(1.35)
         static let maxDigits = 4
+        // 1px 白描边：柔化红角标边缘，避免在深色面板上像贴纸
+        static let strokeWidth = CGFloat(1)
     }
 
     private struct BadgeMetrics {
@@ -85,8 +89,13 @@ class TileFontIconView: NSView {
 
     static var symbolCache = [SymbolCacheKey: NSAttributedString]()
 
+    // dock 角标软上限只在 titles 列表风格生效；appIcons/thumbnails 的大图标保留原始比例
+    private static var capBadgeHeight: Bool { Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles }
+
     static func badgeBaseSize(forIconSize iconSize: CGFloat) -> CGFloat {
-        max((iconSize * BadgeSizing.containerFromIconRatio).rounded(), BadgeSizing.minContainerHeight)
+        let scaled = (iconSize * BadgeSizing.containerFromIconRatio).rounded()
+        let raw = capBadgeHeight ? min(scaled, BadgeSizing.maxContainerHeight) : scaled
+        return max(raw, BadgeSizing.minContainerHeight)
     }
 
     private let rendering: Rendering
@@ -212,6 +221,10 @@ class TileFontIconView: NSView {
         let innerPath = NSBezierPath(roundedRect: innerRect, xRadius: innerRect.height / 2, yRadius: innerRect.height / 2)
         badgeFillColor.setFill()
         innerPath.fill()
+        // 1px 白描边沿内缘描边（lineWidth 一半在路径内、一半在外），不改 badge frame、不影响位置布局
+        NSColor.white.setStroke()
+        innerPath.lineWidth = BadgeSizing.strokeWidth
+        innerPath.stroke()
         guard let cachedBadgeAttributedString else { return }
         let textSize = cachedBadgeTextSize
         let textPoint = NSPoint(x: innerRect.midX - textSize.width / 2, y: innerRect.midY - textSize.height / 2)
@@ -255,7 +268,8 @@ class TileFontIconView: NSView {
     }
 
     private static func badgeMetrics(_ size: CGFloat) -> BadgeMetrics {
-        let rawContainerHeight = max(BadgeSizing.minContainerHeight, size.rounded())
+        let cappedSize = capBadgeHeight ? min(size.rounded(), BadgeSizing.maxContainerHeight) : size.rounded()
+        let rawContainerHeight = max(BadgeSizing.minContainerHeight, cappedSize)
         let textHeight = badgeTextHeight(fromRawContainerHeight: rawContainerHeight)
         let compactContainerHeight = (textHeight / BadgeSizing.textFromContainerRatio).rounded(.up)
         let containerHeight = max(BadgeSizing.minContainerHeight, min(rawContainerHeight, compactContainerHeight))

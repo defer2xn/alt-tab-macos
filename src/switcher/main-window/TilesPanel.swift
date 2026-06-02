@@ -99,10 +99,14 @@ class TilesPanel: NSPanel {
     static func maxThumbnailsWidth(_ screen: NSScreen = NSScreen.preferred) -> CGFloat {
         if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles,
            let readableWidth = TilesView.layoutCache.comfortableReadabilityWidth {
+            // titles 风格的绝对软上限：大屏上面板内容宽不超过 880pt，避免被撑成屏宽 90%；
+            // 880 足够容纳绝大多数窗口标题（约 90+ 等宽字符），少数超长标题走 truncation。
+            let titlesSoftCap = CGFloat(880)
             return (
                 min(
                     screen.frame.width * Appearance.maxWidthOnScreen,
-                    readableWidth + Appearance.intraCellPadding * 2 + Appearance.appIconLabelSpacing + Appearance.iconSize
+                    readableWidth + Appearance.intraCellPadding * 2 + Appearance.appIconLabelSpacing + Appearance.iconSize,
+                    titlesSoftCap
                     // widthOfLongestTitle + Appearance.intraCellPadding * 2 + Appearance.appIconLabelSpacing + Appearance.iconSize
                 ) - Appearance.windowPadding * 2
             ).rounded()
