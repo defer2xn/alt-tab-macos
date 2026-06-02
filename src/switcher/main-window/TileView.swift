@@ -973,9 +973,9 @@ class KeyHintView: FlippedView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard !text.isEmpty, bounds.width > 0, bounds.height > 0 else { return }
-        Appearance.fontColor.withAlphaComponent(0.10).setFill()
+        Appearance.fontColor.withAlphaComponent(0.14).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
-        let str = NSAttributedString(string: text, attributes: [.font: KeyHintView.font(), .foregroundColor: Appearance.secondaryFontColor])
+        let str = NSAttributedString(string: text, attributes: [.font: KeyHintView.font(), .foregroundColor: Appearance.fontColor.withAlphaComponent(0.78)])
         let size = str.size()
         str.draw(at: NSPoint(x: ((bounds.width - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded()))
     }

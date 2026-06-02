@@ -19,7 +19,7 @@ class TilesView {
     static var contentView: EffectView!
     static var currentEffectViewKind: EffectViewKind?
     private static var cachedEffectViews: [EffectViewKind: EffectView] = [:]
-    static var searchField = SwitcherSearchField(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
+    static var searchField = NSSearchField(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
     static var noWindowLabel = NSTextField(labelWithString: NSLocalizedString("No Window", comment: ""))
     // 底部操作提示条：仅 titles 风格显示，硬编码简体中文以匹配设计稿
     static var footerView = NSTextField(labelWithString: "↑ ↓  选择        ↵  打开        esc  关闭")
@@ -51,6 +51,8 @@ class TilesView {
     static var isSearchModeOn: Bool { searchMode != .off }
     static var isSearchEditing: Bool { searchMode == .editing }
     static var isSearchLocked: Bool { searchMode == .locked }
+    /// 是否有有效搜索查询（决定搜索栏空态 vs 出结果态的导航/高亮行为）
+    static var hasSearchQuery: Bool { !Search.normalizedQuery(SwitcherSession.current?.searchQuery ?? "").isEmpty }
 
     static func startSearchSession(_ startInSearchMode: Bool) {
         searchField.stringValue = ""
@@ -100,21 +102,28 @@ class TilesView {
         }
     }
 
+    /// 从搜索栏向下进入列表：收起搜索栏（转 .locked，保留查询），移走焦点环并高亮列表选中行
+    static func exitSearchToList() {
+        guard searchMode == .editing else { App.cycleSelection(.down); return }
+        searchMode = .locked
+        updateSearchFieldEditability()
+        TilesPanel.shared.makeFirstResponder(nil) // 可靠移走搜索框焦点（去掉光标/焦点环）
+        App.refreshUi(true)
+    }
+
     static func enableSearchEditing() {
         if !ProFeature.searchInSwitcher.attemptUse() { return }
         guard searchMode != .editing else {
             placeSearchCaretAtEnd()
             return
         }
-        let wasOff = searchMode == .off
         searchMode = .editing
         updateSearchFieldEditability()
         SwitcherSession.current?.forceDoNothingOnRelease = true
         clearHover()
         stopKeyRepeatTimers()
-        if wasOff {
-            App.refreshUi(true)
-        }
+        // 每次进编辑态都重排：展开搜索框 + 清掉列表高亮（从 .locked 进入时同样需要）
+        App.refreshUi(true)
         TilesPanel.shared.makeFirstResponder(searchField)
         placeSearchCaretAtEnd()
     }
@@ -124,8 +133,14 @@ class TilesView {
         let keyCode = event.keyCode
         if keyCode == UInt16(kVK_LeftArrow) { App.cycleSelection(.left); return .handled }
         if keyCode == UInt16(kVK_RightArrow) { App.cycleSelection(.right); return .handled }
-        if keyCode == UInt16(kVK_UpArrow) { App.cycleSelection(.up); return .handled }
-        if keyCode == UInt16(kVK_DownArrow) { App.cycleSelection(.down); return .handled }
+        if keyCode == UInt16(kVK_UpArrow) {
+            if hasSearchQuery { App.cycleSelection(.up) } // 有结果：结果间上移；空查询：已在顶部搜索栏，不动
+            return .handled
+        }
+        if keyCode == UInt16(kVK_DownArrow) {
+            if hasSearchQuery { App.cycleSelection(.down) } else { exitSearchToList() } // 有结果：结果间下移；空查询：退到列表
+            return .handled
+        }
         if keyCode == UInt16(kVK_Tab) { return .handled }
         if matchesShortcut(event, "cancelShortcut") ||
             matchesShortcut(event, "lockSearchShortcut") ||
@@ -162,10 +177,17 @@ class TilesView {
         searchField.usesSingleLineMode = true
         searchField.target = Self.self
         searchField.action = #selector(Self.searchFieldChanged(_:))
+        // 被动态（未聚焦）下点击搜索框 → 进入搜索（聚焦+锁定）；手势比依赖 NSSearchField 原生点击可靠
+        searchField.addGestureRecognizer(NSClickGestureRecognizer(target: Self.self, action: #selector(Self.searchFieldClicked)))
         NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: searchField, queue: .main) { _ in
             updateSearchQuery(searchField.stringValue)
         }
         updateSearchFieldEditability()
+    }
+
+    @objc private static func searchFieldClicked() {
+        guard SwitcherSession.isActive, searchMode != .editing else { return }
+        enableSearchEditing()
     }
 
     @objc private static func searchFieldChanged(_ sender: NSSearchField) {
@@ -327,6 +349,7 @@ class TilesView {
     }
 
     static func highlight(_ indexInRecycledViews: Int) {
+        guard !(isSearchEditing && !hasSearchQuery) else { return } // 搜索栏空查询时它本身是"选中行"，列表不画高亮；有结果时正常高亮
         guard indexInRecycledViews >= 0, indexInRecycledViews < recycledViews.count else { return }
         let view = recycledViews[indexInRecycledViews]
         view.indexInRecycledViews = indexInRecycledViews
@@ -594,7 +617,12 @@ class TilesView {
         if searchField.superview !== contentView {
             contentView.addSubview(searchField)
         }
-        let searchWidth = minSearchWidth
+        // 动态宽度：搜索（编辑态）时展开为全宽 + 完整占位符，空闲时收成居中窄药丸 + 短占位符
+        let expandedWidth = minSearchWidth
+        let collapsedWidth = (expandedWidth * 0.5).rounded()
+        let editing = searchMode == .editing
+        let searchWidth = editing ? expandedWidth : collapsedWidth
+        searchField.placeholderString = editing ? "搜索窗口、应用或文件" : "搜索"
         searchField.frame.size = NSSize(width: searchWidth, height: searchBarHeight)
         let searchX = originX + (TilesView.thumbnailsWidth - searchWidth) * 0.5
         searchField.frame.origin = CGPoint(x: searchX, y: frameHeight - Appearance.windowPadding - searchBarHeight)
@@ -670,6 +698,11 @@ class TilesView {
     }
 
     private static func highlightStartView() {
+        if isSearchEditing && !hasSearchQuery { // 搜索栏空查询时清空列表高亮（搜索栏即"选中行"）
+            thumbnailUnderLayer.updateHighlight(focusedView: nil, hoveredView: nil)
+            thumbnailOverView.hideWindowControls()
+            return
+        }
         let session = SwitcherSession.current
         if Windows.selectedWindow() != nil {
             TilesView.highlight(session?.selectedIndex ?? 0)
@@ -904,16 +937,6 @@ class TilesDocumentView: FlippedView {
 
 class FlippedView: NSView {
     override var isFlipped: Bool { true }
-}
-
-/// 常驻搜索框：被动态（未聚焦）下点击它即进入搜索（聚焦+锁定面板），否则原生 NSSearchField 不响应点击
-class SwitcherSearchField: NSSearchField {
-    override func mouseDown(with event: NSEvent) {
-        if SwitcherSession.isActive && !TilesView.isSearchEditing {
-            TilesView.enableSearchEditing()
-        }
-        super.mouseDown(with: event)
-    }
 }
 
 

@@ -246,9 +246,17 @@ class App: AppCenterApplication {
     }
 
     static func cycleSelection(_ direction: Direction, allowWrap: Bool = true) {
+        if SwitcherSession.isActive, TilesView.isSearchEditing, !TilesView.hasSearchQuery {
+            // 搜索栏空查询：向前/向下（含 Tab/next）→ 退出到列表；向后/向上 → 不动（已在顶部）
+            // 有查询时不拦截，落到下方正常导航 → Tab/↓ 在结果间移动
+            if direction == .leading || direction == .down || direction == .right {
+                TilesView.exitSearchToList()
+            }
+            return
+        }
         // 从顶行（第一行）继续往上/往前（↑ 或 previous）→ 进入搜索框：聚焦并锁定面板（松开 ⌘ 不关闭）
-        if direction == .up || direction == .trailing,
-           !TilesView.isSearchEditing, SwitcherSession.isActive, Windows.selectedWindow()?.rowIndex == 0 {
+        if (direction == .up || direction == .trailing),
+           SwitcherSession.isActive, Windows.selectedWindow()?.rowIndex == 0 {
             TilesView.enableSearchEditing()
             return
         }
