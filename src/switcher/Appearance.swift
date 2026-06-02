@@ -13,6 +13,8 @@ class Appearance {
     static var iconSize = CGFloat(1000)
     static var fontHeight = CGFloat(3)
     static var font = NSFont.systemFont(ofSize: fontHeight)
+    // 应用名段字体：与 font 同字号、字重 semibold，用于切换器行内"应用名 + 窗口标题"分层渲染
+    static var appNameFont = NSFont.systemFont(ofSize: fontHeight, weight: .semibold)
     static var windowMinWidthInRow = CGFloat(1000)
     static var windowMaxWidthInRow = CGFloat(1000)
 
@@ -24,6 +26,8 @@ class Appearance {
 
     // theme
     static var fontColor = NSColor.red
+    // 次级文本色：用于"应用名 + 窗口标题"行内分层时的窗口标题段，制造层次
+    static var secondaryFontColor = NSColor.gray
     static var imagesShadowColor = NSColor.red // for icon, thumbnail and windowless images
     static var material = NSVisualEffectView.Material.ultraDark
     static var highlightBorderWidth = CGFloat(3)
@@ -186,16 +190,19 @@ class Appearance {
         } else {
             font = NSFont.systemFont(ofSize: fontHeight)
         }
+        appNameFont = NSFont.systemFont(ofSize: fontHeight, weight: .semibold)
     }
 
     private static func lightTheme() {
         fontColor = .black.withAlphaComponent(0.8)
+        secondaryFontColor = .black.withAlphaComponent(0.5)
         imagesShadowColor = .gray.withAlphaComponent(0.8)
         material = .mediumLight
     }
 
     private static func darkTheme() {
         fontColor = .white.withAlphaComponent(0.85)
+        secondaryFontColor = .white.withAlphaComponent(0.5)
         imagesShadowColor = .gray.withAlphaComponent(0.8)
         material = .dark
     }

@@ -335,6 +335,10 @@ class TileView: FlippedView {
         // No query → skip the attributed-string highlight path entirely; let cell attributes render.
         // Set stringValue unconditionally to drop any prior attributedStringValue rich runs.
         if query.isEmpty {
+            if let appNameLen = appNameCharCount() {
+                label.attributedStringValue = layeredTitleAttributedString(appNameLen: appNameLen)
+                return
+            }
             label.stringValue = fullTitle
             return
         }
@@ -344,6 +348,19 @@ class TileView: FlippedView {
         let highlightedIndexes = highlightedIndexes(spanRanges, titleLength)
         let truncation = truncatedDisplay(fullTitle, maxWidth: label.frame.size.width, mode: label.lineBreakMode, attributes: clippingAttributes)
         let attributed = NSMutableAttributedString(string: truncation.text, attributes: clippingAttributes)
+        // 分层着色先于搜索高亮：搜索高亮再覆盖 .foregroundColor，匹配字符仍显示高亮前景色而非次级灰
+        if let appNameLen = appNameCharCount() {
+            let appIdx = Set(0..<appNameLen)
+            for range in visibleHighlightRanges(truncation.visibleToOriginal, appIdx) {
+                attributed.addAttribute(.font, value: Appearance.appNameFont, range: range)
+            }
+            if appNameLen < titleLength {
+                let secondaryIdx = Set(appNameLen..<titleLength)
+                for range in visibleHighlightRanges(truncation.visibleToOriginal, secondaryIdx) {
+                    attributed.addAttribute(.foregroundColor, value: Appearance.secondaryFontColor, range: range)
+                }
+            }
+        }
         for range in visibleHighlightRanges(truncation.visibleToOriginal, highlightedIndexes) {
             attributed.addAttribute(TileTitleView.searchHighlightBackgroundKey, value: Appearance.searchMatchHighlightColor, range: range)
             attributed.addAttribute(.foregroundColor, value: Appearance.searchMatchForegroundColor, range: range)
@@ -364,6 +381,39 @@ class TileView: FlippedView {
         // `.natural` for the others) and on `label.lineBreakMode` (per-title truncation pref).
         // With per-shortcut style overrides, those can differ across tiles in the same panel,
         // so a shared static cache was returning stale alignment to whichever tile rendered second.
+    }
+
+    /// 无搜索时的分层富文本：基础属性来自 baseTitleAttributes()，应用名段覆盖 semibold 字体，
+    /// 其余段（含 " - " 分隔符与窗口标题）覆盖次级文本色，制造视觉层次。
+    private func layeredTitleAttributedString(appNameLen: Int) -> NSAttributedString {
+        let attributed = NSMutableAttributedString(string: fullTitle, attributes: baseTitleAttributes())
+        let appUtf16End = utf16Offset(in: fullTitle, characterIndex: appNameLen)
+        let totalUtf16 = (fullTitle as NSString).length
+        if appUtf16End > 0 {
+            attributed.addAttribute(.font, value: Appearance.appNameFont, range: NSRange(location: 0, length: appUtf16End))
+        }
+        if appUtf16End < totalUtf16 {
+            attributed.addAttribute(.foregroundColor, value: Appearance.secondaryFontColor, range: NSRange(location: appUtf16End, length: totalUtf16 - appUtf16End))
+        }
+        return attributed
+    }
+
+    /// 仅在"应用名 + 窗口标题"模式且两段都非空时返回应用名的字符数（Character 计数，与 truncatedDisplay 的口径一致）。
+    /// 其它模式返回 nil，调用方据此跳过分层渲染保持现状。
+    private func appNameCharCount() -> Int? {
+        guard Preferences.showTitles == .appNameAndWindowTitle else { return nil }
+        // appIcons 风格 label 居中单行，分层会让视觉中心偏移、与大图标聚焦冲突；只在列表类风格分层
+        guard TileView.cachedEffectiveStyle != .appIcons else { return nil }
+        guard let appName = window_?.application.localizedName, !appName.isEmpty else { return nil }
+        guard let windowTitle = window_?.title, !windowTitle.isEmpty else { return nil }
+        return appName.count
+    }
+
+    /// 把"字符数边界"换算成 NSAttributedString 用的 UTF-16 偏移：
+    /// 中文/emoji 下 Character 数 ≠ utf16.count，必须按前缀的 utf16 长度算，否则 NSRange 会错位。
+    private func utf16Offset(in fullString: String, characterIndex: Int) -> Int {
+        if characterIndex <= 0 { return 0 }
+        return fullString.prefix(characterIndex).utf16.count
     }
 
     private func baseTitleAttributes(_ forceClipping: Bool = false) -> [NSAttributedString.Key: Any] {
