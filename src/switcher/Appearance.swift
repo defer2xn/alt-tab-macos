@@ -166,8 +166,8 @@ class Appearance {
         hideThumbnails = true
         windowPadding = 18
         windowCornerRadius = 23
-        cellCornerRadius = 10
-        edgeInsetsSize = 7
+        cellCornerRadius = 12
+        edgeInsetsSize = 8
         windowMinWidthInRow = 0.6
         windowMaxWidthInRow = 0.9
         rowsCount = 1

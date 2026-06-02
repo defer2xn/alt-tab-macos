@@ -42,7 +42,8 @@ class StatusIconsView: FlippedView {
 
     static func cachedAttrString(for symbol: String) -> NSAttributedString {
         let size = Appearance.fontHeight
-        let color = Appearance.fontColor
+        // 状态圆圈（Space 号 / 隐藏 / 全屏 / 最小化）退到次要色，不抢镜
+        let color = Appearance.secondaryFontColor
         let key = TileFontIconView.SymbolCacheKey(symbol: symbol, size: size, colorKey: TileFontIconView.symbolColorKey(color))
         if let cached = TileFontIconView.symbolCache[key] { return cached }
         let font = NSFont(name: "SF Pro Text", size: (size * 0.85).rounded())!
