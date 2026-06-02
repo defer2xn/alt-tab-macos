@@ -84,49 +84,25 @@ class TileView: FlippedView {
         updateSizes(newHeight)
         updatePositions(newHeight)
         applySearchHighlight()
-        resetLabelFocusAlpha()
     }
-
-    // 非 appIcons 风格下，行填充/回收复用时默认把标题透明度压到次级；选中/悬停由 drawHighlight 提亮。
-    // 不改 font 粗细，避免选中切换时文字宽度变化导致行内排版抖动。
-    private func resetLabelFocusAlpha() {
-        guard TileView.cachedEffectiveStyle != .appIcons else {
-            label.alphaValue = 1
-            return
-        }
-        // 搜索态：所有命中行保持全清晰，不做焦点 dim
-        if !(SwitcherSession.current?.searchQuery.isEmpty ?? true) {
-            label.alphaValue = 1
-            return
-        }
-        label.alphaValue = TileView.dimmedLabelAlpha
-    }
-
-    static let dimmedLabelAlpha: CGFloat = 0.6
 
     func drawHighlight() {
+        guard TileView.cachedEffectiveStyle == .appIcons else { return }
         let session = SwitcherSession.current
         let isFocused = indexInRecycledViews == (session?.selectedIndex ?? 0)
         let isHovered = indexInRecycledViews == session?.hoveredIndex
-        if TileView.cachedEffectiveStyle == .appIcons {
-            let shouldBeVisible = isFocused || isHovered
-            // Update the frame BEFORE unhiding. `applyCurrentStyle()` already set
-            // `label.isHidden = true` in `updateRecycledCellWithNewContent`; the label's frame is
-            // still at its previous-style position (e.g. right-of-icon from thumbnails). Setting
-            // `isHidden = false` first would briefly reveal the label at the stale position before
-            // `updateAppIconsLabelFrame()` moves it under the icon — that's the "title slides from
-            // right of icon to under the icon" frame the user reported during cross-style summons.
-            if shouldBeVisible {
-                updateAppIconsLabelFrame()
-            }
-            label.isHidden = !shouldBeVisible
-            updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
-            return
+        let shouldBeVisible = isFocused || isHovered
+        // Update the frame BEFORE unhiding. `applyCurrentStyle()` already set
+        // `label.isHidden = true` in `updateRecycledCellWithNewContent`; the label's frame is
+        // still at its previous-style position (e.g. right-of-icon from thumbnails). Setting
+        // `isHidden = false` first would briefly reveal the label at the stale position before
+        // `updateAppIconsLabelFrame()` moves it under the icon — that's the "title slides from
+        // right of icon to under the icon" frame the user reported during cross-style summons.
+        if shouldBeVisible {
+            updateAppIconsLabelFrame()
         }
-        // 列表风格（titles/thumbnails）：选中或悬停行标题全亮，其他行压暗；
-        // 搜索态不压暗，保证所有命中行都清晰可扫
-        let hasSearch = !(session?.searchQuery.isEmpty ?? true)
-        label.alphaValue = (hasSearch || isFocused || isHovered) ? 1 : TileView.dimmedLabelAlpha
+        label.isHidden = !shouldBeVisible
+        updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
     }
 
     func updateDockLabelIcon(_ dockLabel: String?) {

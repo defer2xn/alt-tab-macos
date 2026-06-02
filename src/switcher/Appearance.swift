@@ -173,13 +173,13 @@ class Appearance {
         rowsCount = 1
         switch size {
             case .small:
-                iconSize = 18
+                iconSize = 22
                 fontHeight = 13
             case .medium:
-                iconSize = 24
+                iconSize = 26
                 fontHeight = 14
             case .large, .auto:
-                iconSize = 30
+                iconSize = 32
                 fontHeight = 16
         }
     }
