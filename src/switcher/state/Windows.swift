@@ -13,6 +13,18 @@ class Windows {
         window.shouldShowTheUser && Search.matches(window, query: (SwitcherSession.current?.searchQuery ?? ""))
     }
 
+    /// 当前可见（通过 shouldDisplay 过滤）窗口中的第 index 个（从 0 起），按 list 顺序即视觉自上而下顺序
+    static func nthDisplayed(_ index: Int) -> Window? {
+        guard index >= 0 else { return nil }
+        var count = 0
+        for window in list {
+            guard shouldDisplay(window) else { continue }
+            if count == index { return window }
+            count += 1
+        }
+        return nil
+    }
+
     static func updateSearchQuery(_ query: String) {
         let previousTrimmedQuery = Search.normalizedQuery(SwitcherSession.current?.searchQuery ?? "")
         let newTrimmedQuery = Search.normalizedQuery(query)

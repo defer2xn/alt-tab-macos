@@ -21,6 +21,8 @@ class TilesView {
     private static var cachedEffectViews: [EffectViewKind: EffectView] = [:]
     static var searchField = NSSearchField(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
     static var noWindowLabel = NSTextField(labelWithString: NSLocalizedString("No Window", comment: ""))
+    // 底部操作提示条：仅 titles 风格显示，硬编码简体中文以匹配设计稿
+    static var footerView = NSTextField(labelWithString: "↑ ↓  选择        ↵  打开        esc  关闭")
     private(set) static var searchMode: SearchMode = .off
     static var rows = [[TileView]]()
     private static var lastRowSignature = [Int]()
@@ -38,6 +40,7 @@ class TilesView {
         guard !initialized else { return }
         configureSearchField()
         configureNoWindowLabel()
+        configureFooterView()
         updateBackgroundView()
         // TODO: think about this optimization more
         (1...20).forEach { _ in TilesView.recycledViews.append(TileView()) }
@@ -137,8 +140,15 @@ class TilesView {
         noWindowLabel.isHidden = true
     }
 
+    private static func configureFooterView() {
+        footerView.textColor = .secondaryLabelColor
+        footerView.font = .systemFont(ofSize: 12)
+        footerView.alignment = .center
+        footerView.isHidden = true
+    }
+
     private static func configureSearchField() {
-        searchField.placeholderString = NSLocalizedString("Search", comment: "")
+        searchField.placeholderString = "搜索窗口、应用或文件"
         searchField.sendsSearchStringImmediately = true
         searchField.sendsWholeSearchString = true
         searchField.bezelStyle = .roundedBezel
@@ -264,6 +274,7 @@ class TilesView {
         }
         contentView.addSubview(scrollView)
         contentView.addSubview(noWindowLabel)
+        contentView.addSubview(footerView)
     }
 
     static func swapBackgroundViewIfNeeded() {
@@ -277,6 +288,7 @@ class TilesView {
         }
         newView.addSubview(scrollView)
         newView.addSubview(noWindowLabel)
+        newView.addSubview(footerView)
         contentView = newView
         TilesPanel.shared.contentView = newView
     }
@@ -316,6 +328,7 @@ class TilesView {
         lastRowSignature.removeAll()
         TileView.invalidateTitleAttributesCache()
         cachedSearchBarHeight = nil
+        cachedFooterHeight = nil
         Self.updateCachedSizes()
     }
 
@@ -429,7 +442,7 @@ class TilesView {
 
     private static func resolveAutoSize(_ widthMax: CGFloat) {
         let searchReservedHeight: CGFloat = searchMode == .off ? 0 : searchBarHeight() + 10
-        let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight)
+        let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReservedHeight())
         for size in [AppearanceSizePreference.large, .medium, .small] {
             Appearance.applySize(size)
             Self.updateCachedSizes()
@@ -448,13 +461,16 @@ class TilesView {
         var currentY = Appearance.interCellPadding
         var maxY = currentY + height + Appearance.interCellPadding
         var index = 0
+        var displayCount = 0
         while index < TilesView.recycledViews.count {
             guard SwitcherSession.isActive else { return maxY }
             defer { index += 1 }
             let view = TilesView.recycledViews[index]
             guard index < Windows.list.count else { break }
             let window = Windows.list[index]
-            guard Windows.shouldDisplay(window) else { view.frame = .zero; continue }
+            guard Windows.shouldDisplay(window) else { view.frame = .zero; view.displayIndex = -1; continue }
+            view.displayIndex = displayCount
+            displayCount += 1
             view.updateRecycledCellWithNewContent(window, index, height)
             let width = view.frame.size.width
             let projectedX = projectedWidth(currentX, width).rounded(.down)
@@ -486,6 +502,7 @@ class TilesView {
         // rebuild wid→tile from this layout pass; sheds dict entries left over from removed windows
         widToView.removeAll(keepingCapacity: true)
         var index = 0
+        var displayCount = 0
         while index < TilesView.recycledViews.count {
             guard SwitcherSession.isActive else { return nil }
             defer { index = index + 1 }
@@ -494,8 +511,11 @@ class TilesView {
                 let window = Windows.list[index]
                 guard Windows.shouldDisplay(window) else {
                     view.frame = .zero
+                    view.displayIndex = -1
                     continue
                 }
+                view.displayIndex = displayCount
+                displayCount += 1
                 view.updateRecycledCellWithNewContent(window, index, height)
                 let width = view.frame.size.width
                 let projectedX = projectedWidth(currentX, width).rounded(.down)
@@ -521,6 +541,7 @@ class TilesView {
                 view.appIcon.releaseImage()
                 evictWidMapping(for: view)
                 view.window_ = nil
+                view.displayIndex = -1
             }
         }
         scrollView.documentView!.subviews = newViews
@@ -555,16 +576,17 @@ class TilesView {
         let searchBarHeight = searchBarHeight()
         let searchBottomPadding = CGFloat(10)
         let searchReservedHeight = searchMode == .off ? 0 : searchBarHeight + searchBottomPadding
-        let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight)
+        let footerReserved = footerReservedHeight()
+        let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReserved)
         let minSearchWidth = min(widthMax, 320)
         let minWidth = min(widthMax, 320)
         TilesView.thumbnailsWidth = max(min(maxX, widthMax), searchMode == .off ? (maxX == 0 ? minWidth : 0) : minWidth)
         TilesView.thumbnailsHeight = min(maxY, heightMax)
         let appIconsBottomViewportPadding = appIconsBottomViewportPadding(maxY, heightMax, labelHeight)
         let frameWidth = TilesView.thumbnailsWidth + Appearance.windowPadding * 2
-        var frameHeight = TilesView.thumbnailsHeight + Appearance.windowPadding * 2 + searchReservedHeight
+        var frameHeight = TilesView.thumbnailsHeight + Appearance.windowPadding * 2 + searchReservedHeight + footerReserved
         let originX = Appearance.windowPadding
-        var originY = Appearance.windowPadding
+        var originY = Appearance.windowPadding + footerReserved
         if Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .appIcons {
             // If there is title under the icon on the last line, the height of the title needs to be subtracted.
             frameHeight = frameHeight - Appearance.intraCellPadding - labelHeight
@@ -586,6 +608,12 @@ class TilesView {
             searchField.layoutSubtreeIfNeeded()
         } else if searchField.superview != nil {
             searchField.removeFromSuperview()
+        }
+        if footerReserved > 0 {
+            footerView.isHidden = false
+            footerView.frame = CGRect(x: originX, y: Appearance.windowPadding, width: TilesView.thumbnailsWidth, height: footerHeight())
+        } else {
+            footerView.isHidden = true
         }
         if App.shared.userInterfaceLayoutDirection == .rightToLeft {
             let croppedWidth = max(0, TilesView.thumbnailsWidth - maxX)
@@ -613,6 +641,24 @@ class TilesView {
         let height = fitting > 0 ? ceil(fitting) : ceil(searchField.cell?.cellSize.height ?? 30)
         cachedSearchBarHeight = height
         return height
+    }
+
+    private static var cachedFooterHeight: CGFloat?
+    private static let footerBottomGap = CGFloat(8)
+
+    private static func footerEnabled() -> Bool {
+        Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles
+    }
+
+    private static func footerHeight() -> CGFloat {
+        if let cached = cachedFooterHeight { return cached }
+        let height = ceil(footerView.cell?.cellSize.height ?? 16)
+        cachedFooterHeight = height
+        return height
+    }
+
+    private static func footerReservedHeight() -> CGFloat {
+        footerEnabled() ? footerHeight() + footerBottomGap : 0
     }
 
     private static func appIconsBottomViewportPadding(_ maxY: CGFloat, _ heightMax: CGFloat, _ labelHeight: CGFloat) -> CGFloat {

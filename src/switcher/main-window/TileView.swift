@@ -18,6 +18,9 @@ class TileView: FlippedView {
     var appIconHighlight = noAnimation { CALayer() }
     var label = TileTitleView(font: Appearance.font)
     var statusIcons = StatusIconsView()
+    // titles 风格下前 9 个可见行的右侧用 ⌘N 快捷提示替换状态圆圈；displayIndex 是当前可见序号（0 起）
+    var keyHintBadge = NSTextField(labelWithString: "")
+    var displayIndex = -1
     var dockLabelIcon = TileFontIconView(badgeSize: TileFontIconView.badgeBaseSize(forIconSize: TileView.iconSize().width))
     var windowlessAppIndicator = WindowlessAppIndicator(tooltip: TileView.noOpenWindowToolTip)
     private var fullTitle = ""
@@ -144,9 +147,10 @@ class TileView: FlippedView {
         // outlive any single style, so we toggle visibility in `applyCurrentStyle()` instead of
         // conditionally attaching at init time.
         layer!.addSublayer(thumbnail)
-        addSubviews([label, statusIcons])
+        addSubviews([label, statusIcons, keyHintBadge])
         setSubviewAbove(windowlessAppIndicator)
         addSubview(dockLabelIcon)
+        configureKeyHintBadge()
         label.fixHeight()
         // Disable implicit CALayer animations on every subview that moves between styles. The
         // `caTransaction { setDisableActions(true) }` in `TilesPanel.updateContents` covers the
@@ -158,6 +162,7 @@ class TileView: FlippedView {
         // want for a switcher (no animations are ever desired here).
         TileView.disableImplicitLayerAnimations(on: label)
         TileView.disableImplicitLayerAnimations(on: statusIcons)
+        TileView.disableImplicitLayerAnimations(on: keyHintBadge)
         TileView.disableImplicitLayerAnimations(on: windowlessAppIndicator)
         TileView.disableImplicitLayerAnimations(on: dockLabelIcon)
     }
@@ -192,6 +197,48 @@ class TileView: FlippedView {
         // recycled tile 可能携带上一帧的"选中提亮色"，先回到基础色；如果当前位置是焦点行，
         // 后续 TilesView.highlight() 会再次 drawHighlight 覆盖回提亮色。
         label.textColor = Appearance.fontColor
+    }
+
+    private func configureKeyHintBadge() {
+        keyHintBadge.font = NSFont.systemFont(ofSize: (Appearance.fontHeight * 0.82).rounded(), weight: .medium)
+        keyHintBadge.textColor = Appearance.secondaryFontColor
+        keyHintBadge.alignment = .right
+        keyHintBadge.isHidden = true
+    }
+
+    /// titles 风格下前 9 个可见行（⌘1–⌘9）才显示快捷提示徽标
+    private var showsKeyHint: Bool {
+        TileView.cachedEffectiveStyle == .titles && displayIndex >= 0 && displayIndex < 9
+    }
+
+    /// 右侧槽位宽度：显示徽标时用徽标宽度，否则用状态图标条宽度
+    private func rightSlotWidth() -> CGFloat {
+        showsKeyHint ? keyHintBadge.frame.width : statusIcons.totalWidth
+    }
+
+    private func updateKeyHintBadge() {
+        let shows = showsKeyHint
+        if shows {
+            let text = "⌘\(displayIndex + 1)"
+            if keyHintBadge.stringValue != text {
+                keyHintBadge.stringValue = text
+                keyHintBadge.sizeToFit()
+            }
+            statusIcons.isHidden = true
+        }
+        keyHintBadge.isHidden = !shows
+    }
+
+    /// 右侧槽位布局：显示徽标时把徽标贴右居中，否则按原逻辑排状态图标
+    private func layoutRightSlot(hWidth: CGFloat, hHeight: CGFloat, edgeInsets: CGFloat) {
+        guard showsKeyHint else {
+            statusIcons.layoutIcons(hWidth: hWidth, hHeight: hHeight, edgeInsets: edgeInsets)
+            return
+        }
+        let isLTR = App.shared.userInterfaceLayoutDirection == .leftToRight
+        let x = isLTR ? edgeInsets + hWidth - keyHintBadge.frame.width : edgeInsets
+        let y = edgeInsets + ((hHeight - keyHintBadge.frame.height) / 2).rounded()
+        assignIfDifferent(&keyHintBadge.frame.origin, NSPoint(x: x, y: y))
     }
 
     private func updateAppIconsLabel(isFocused: Bool, isHovered: Bool) {
@@ -284,6 +331,7 @@ class TileView: FlippedView {
                 )
             }())
         )
+        updateKeyHintBadge()
         if !thumbnail.isHidden {
             if let screenshot = element.thumbnail {
                 let thumbnailSize = TileView.thumbnailSize(element.size, false)
@@ -569,7 +617,7 @@ class TileView: FlippedView {
         setFrameWidthHeight(newHeight)
         if TileView.cachedEffectiveStyle != .appIcons {
             let hWidth = frame.width - Appearance.edgeInsetsSize * 2
-            let labelWidth = hWidth - appIcon.frame.width - Appearance.appIconLabelSpacing - statusIcons.totalWidth
+            let labelWidth = hWidth - appIcon.frame.width - Appearance.appIconLabelSpacing - rightSlotWidth()
             label.setWidth(labelWidth)
         }
     }
@@ -584,8 +632,8 @@ class TileView: FlippedView {
             if App.shared.userInterfaceLayoutDirection == .rightToLeft {
                 assignIfDifferent(&appIcon.frame.origin.x, edgeInsets + hWidth - appIcon.frame.width)
             }
-            statusIcons.layoutIcons(hWidth: hWidth, hHeight: hHeight, edgeInsets: edgeInsets)
-            let labelWidth = hWidth - appIcon.frame.width - Appearance.appIconLabelSpacing - statusIcons.totalWidth
+            layoutRightSlot(hWidth: hWidth, hHeight: hHeight, edgeInsets: edgeInsets)
+            let labelWidth = hWidth - appIcon.frame.width - Appearance.appIconLabelSpacing - rightSlotWidth()
             let labelX: CGFloat
             if App.shared.userInterfaceLayoutDirection == .leftToRight {
                 labelX = appIcon.frame.maxX + Appearance.appIconLabelSpacing

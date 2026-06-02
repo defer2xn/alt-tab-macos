@@ -326,9 +326,10 @@ class App: AppCenterApplication {
             // in its final state. No-op on first summon (panel was orderOut'd with alpha=0).
             TilesPanel.shared.alphaValue = 0
             ProTransitionManager.shared.onSwitcherShown()
-            let shouldStartInSearchMode = Preferences.effectiveShortcutStyle(shortcutIndex) == .searchOnRelease
-            TilesView.startSearchSession(shouldStartInSearchMode)
-            if shouldStartInSearchMode {
+            // 始终进入搜索编辑态：召唤即自动聚焦、打字即筛选；松开是否激活仍由 shortcutStyle 决定
+            let searchOnReleaseStyle = Preferences.effectiveShortcutStyle(shortcutIndex) == .searchOnRelease
+            TilesView.startSearchSession(true)
+            if searchOnReleaseStyle {
                 session.forceDoNothingOnRelease = true
             }
             if !Windows.updatesBeforeShowing() { hideUi(); return }

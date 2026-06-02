@@ -11,6 +11,13 @@ class KeyboardEventsTestable {
 
 @discardableResult
 func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?, _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool, _ event: NSEvent? = nil) -> Bool {
+    // ⌘+数字 1–9：switcher 打开时直跳第 N 个可见窗口。用 ⌘ 修饰避免与搜索框输入数字冲突，
+    // 且放在搜索拦截之前，搜索编辑态下同样生效
+    if SwitcherSession.isActive, let keyCode, let modifiers, modifiers.contains(.command),
+       let n = directSelectDigit(keyCode), let window = Windows.nthDisplayed(n - 1) {
+        App.focusSelectedWindow(window)
+        return true
+    }
     if let event, shouldAbsorbSearchEditingKeyDown(event) {
         switch TilesView.handleSearchEditingKeyDown(event) {
         case .handled: return true
@@ -36,6 +43,22 @@ private func logKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?,
         let modifiersAsString = modifiers.flatMap { SymbolicModifierFlagsTransformer.shared.transformedValue(NSNumber(value: $0.rawValue)) }
         let keyCodeAsString = keyCode.flatMap { SymbolicKeyCodeTransformer.shared.transformedValue(NSNumber(value: $0)) }
         return "keys:\(modifiersAsString ?? "")\(keyCodeAsString ?? "") isARepeat:\(isARepeat)"
+    }
+}
+
+/// ANSI 数字键 1–9 的键码 → 数字；其它返回 nil。switcher 打开时数字键直选第 N 个窗口
+private func directSelectDigit(_ keyCode: UInt32) -> Int? {
+    switch keyCode {
+    case 18: return 1
+    case 19: return 2
+    case 20: return 3
+    case 21: return 4
+    case 23: return 5
+    case 22: return 6
+    case 26: return 7
+    case 28: return 8
+    case 25: return 9
+    default: return nil
     }
 }
 
