@@ -105,9 +105,10 @@ class TileView: FlippedView {
             updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
             return
         }
-        // 选中行文字提亮：仅调 textColor 不动字重避免重排。attributed 路径（搜索高亮 / 应用名+标题分层）的
-        // .foregroundColor 会覆盖 textColor，本轮按 spec 不处理这两种路径下的焦点色变。
-        label.textColor = isFocused ? .alternateSelectedControlTextColor : Appearance.fontColor
+        // 选中行文字色：titles 为淡底，保持正常 labelColor；thumbnails/appIcons 为饱和填充块，选中时翻白。
+        // 仅调 textColor 不动字重避免重排；attributed 路径（搜索高亮 / 应用名+标题分层）的 .foregroundColor 会覆盖 textColor。
+        let onSolidFill = isFocused && TileView.cachedEffectiveStyle != .titles
+        label.textColor = onSolidFill ? .alternateSelectedControlTextColor : Appearance.fontColor
     }
 
     func updateDockLabelIcon(_ dockLabel: String?) {

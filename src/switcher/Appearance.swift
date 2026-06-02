@@ -33,11 +33,15 @@ class Appearance {
     static var imagesShadowColor = NSColor.red // for icon, thumbnail and windowless images
     static var material = NSVisualEffectView.Material.ultraDark
     static var highlightBorderWidth = CGFloat(3)
+    // titles 选中态左侧指示条宽度，由 updateTheme() 设置：titles 为非 0，其余样式为 0（不绘制）
+    static var highlightFocusedIndicatorWidth = CGFloat(0)
 
     // theme: constants
     static var enablePanelShadow = true
-    // 实心 accent 选中态：靠饱和填充色块区分选中行，描边交由 updateTheme() 把 titles 的 borderWidth 设 0。
-    static var highlightFocusedBackgroundColor: NSColor { get { NSColor.systemAccentColor.withAlphaComponent(0.85) } }
+    // 选中态：titles 用克制的淡 accent 底 + 左侧指示条（见 highlightFocusedIndicatorColor），靠信息而非满铺色块区分；
+    // 其余样式（thumbnails/appIcons）保留饱和填充色块。描边交由 updateTheme() 把 titles 的 borderWidth 设 0。
+    static var highlightFocusedBackgroundColor: NSColor { get { currentStyle == .titles ? NSColor.systemAccentColor.withAlphaComponent(0.22) : NSColor.systemAccentColor.withAlphaComponent(0.85) } }
+    static var highlightFocusedIndicatorColor: NSColor { get { NSColor.systemAccentColor } }
     static var highlightHoveredBackgroundColor: NSColor { get { NSColor.systemAccentColor.withAlphaComponent(0.18) } }
     static var highlightFocusedBorderColor: NSColor { get { currentStyle == .titles ? .clear : NSColor.systemAccentColor.withAlphaComponent(0.5) } }
     static var highlightHoveredBorderColor: NSColor { get { NSColor.systemAccentColor.withAlphaComponent(0.28) } }
@@ -84,6 +88,7 @@ class Appearance {
 
     private static func updateTheme() {
         highlightBorderWidth = currentStyle == .titles ? 0 : 3
+        highlightFocusedIndicatorWidth = currentStyle == .titles ? 3 : 0
         if currentTheme == .dark {
             darkTheme()
         } else {
