@@ -197,19 +197,11 @@ class Appearance {
 
     private static func lightTheme() {
         imagesShadowColor = .gray.withAlphaComponent(0.8)
-        material = preferredMaterial(forDark: false)
+        material = .mediumLight
     }
 
     private static func darkTheme() {
         imagesShadowColor = .gray.withAlphaComponent(0.8)
-        material = preferredMaterial(forDark: true)
-    }
-
-    // hudWindow 仅 10.14+ 可用；老系统回退到原 mediumLight/dark，保证编译与运行兼容
-    private static func preferredMaterial(forDark: Bool) -> NSVisualEffectView.Material {
-        if #available(macOS 10.14, *) {
-            return .hudWindow
-        }
-        return forDark ? .dark : .mediumLight
+        material = .dark
     }
 }
