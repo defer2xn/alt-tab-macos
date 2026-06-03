@@ -15,6 +15,9 @@ class TileTitleView: NSTextField {
         return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
 
+    // 关闭 vibrancy：在毛玻璃面板里 NSTextField 默认会被"洗"成偏灰，关掉后文字以实色清晰渲染（与自绘的 ⌘N 徽标一致）
+    override var allowsVibrancy: Bool { false }
+
     /// `NSView` is its own `CALayerDelegate`. By implementing `action(for:forKey:)` on this
     /// subclass we intercept the lookup AppKit performs when a layer property changes, and
     /// return `NSNull()` for the animation keys — the documented "no animation for this key"

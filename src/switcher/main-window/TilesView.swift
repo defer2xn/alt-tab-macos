@@ -170,9 +170,7 @@ class TilesView {
         searchField.sendsSearchStringImmediately = true
         searchField.sendsWholeSearchString = true
         searchField.bezelStyle = .roundedBezel
-        if #available(macOS 26.0, *) {
-            searchField.controlSize = .extraLarge
-        } else if #available(macOS 13.0, *) {
+        if #available(macOS 13.0, *) {
             searchField.controlSize = .large
         } else {
             searchField.controlSize = .regular
@@ -462,7 +460,7 @@ class TilesView {
 
     private static func resolveAutoSize(_ widthMax: CGFloat) {
         let searchFieldShown = TileView.cachedEffectiveStyle == .titles || searchMode != .off
-        let searchReservedHeight: CGFloat = searchFieldShown ? searchBarHeight() + 10 : 0
+        let searchReservedHeight: CGFloat = searchFieldShown ? searchBarHeight() + searchBottomPadding : 0
         let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReservedHeight())
         for size in [AppearanceSizePreference.large, .medium, .small] {
             Appearance.applySize(size)
@@ -595,7 +593,6 @@ class TilesView {
 
     private static func layoutParentViews(_ maxX: CGFloat, _ widthMax: CGFloat, _ maxY: CGFloat, _ labelHeight: CGFloat) {
         let searchBarHeight = searchBarHeight()
-        let searchBottomPadding = CGFloat(10)
         // 搜索框：titles 风格常驻可见；其它风格仅搜索激活时显示，避免白占面板高度
         let searchFieldShown = TileView.cachedEffectiveStyle == .titles || searchMode != .off
         let searchReservedHeight = searchFieldShown ? searchBarHeight + searchBottomPadding : 0
@@ -668,6 +665,8 @@ class TilesView {
     }
 
     private static var cachedSearchBarHeight: CGFloat?
+    // 搜索框与下方列表之间的间距；dryRun 预估与正式布局共用同一值，避免两处对不上
+    private static let searchBottomPadding = CGFloat(8)
 
     private static func searchBarHeight() -> CGFloat {
         if let cached = cachedSearchBarHeight { return cached }

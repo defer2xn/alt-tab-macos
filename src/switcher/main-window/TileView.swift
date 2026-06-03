@@ -111,7 +111,7 @@ class TileView: FlippedView {
         // 选中行文字色：titles 为淡底，保持正常 labelColor；thumbnails/appIcons 为饱和填充块，选中时翻白。
         // 仅调 textColor 不动字重避免重排；attributed 路径（搜索高亮 / 应用名+标题分层）的 .foregroundColor 会覆盖 textColor。
         let onSolidFill = isFocused && TileView.cachedEffectiveStyle != .titles
-        label.textColor = onSolidFill ? .alternateSelectedControlTextColor : Appearance.fontColor
+        label.textColor = onSolidFill ? .alternateSelectedControlTextColor : titlePrimaryColor
     }
 
     func updateDockLabelIcon(_ dockLabel: String?) {
@@ -196,9 +196,10 @@ class TileView: FlippedView {
         label.isHidden = style == .appIcons
         label.maximumNumberOfLines = 1
         label.usesSingleLineMode = true
+        label.font = Appearance.font
         // recycled tile 可能携带上一帧的"选中提亮色"，先回到基础色；如果当前位置是焦点行，
         // 后续 TilesView.highlight() 会再次 drawHighlight 覆盖回提亮色。
-        label.textColor = Appearance.fontColor
+        label.textColor = titlePrimaryColor
     }
 
     private func configureKeyHintBadge() {
@@ -458,7 +459,9 @@ class TileView: FlippedView {
     /// 仅在"应用名 + 窗口标题"模式且两段都非空时返回应用名的字符数（Character 计数，与 truncatedDisplay 的口径一致）。
     /// 其它模式返回 nil，调用方据此跳过分层渲染保持现状。
     private func appNameCharCount() -> Int? {
-        guard Preferences.showTitles == .appNameAndWindowTitle || TileView.cachedEffectiveStyle == .titles else { return nil }
+        // titles 列表风格整行统一黑色细体，不分层（即使 showTitles 为 appNameAndWindowTitle 也不分层）
+        guard TileView.cachedEffectiveStyle != .titles else { return nil }
+        guard Preferences.showTitles == .appNameAndWindowTitle else { return nil }
         // appIcons 风格 label 居中单行，分层会让视觉中心偏移、与大图标聚焦冲突；只在列表类风格分层
         guard TileView.cachedEffectiveStyle != .appIcons else { return nil }
         guard let appName = window_?.application.localizedName, !appName.isEmpty else { return nil }
@@ -473,12 +476,18 @@ class TileView: FlippedView {
         return fullString.prefix(characterIndex).utf16.count
     }
 
+    /// titles 主文本色：系统 labelColor 是「黑 + 0.85 透明度」，叠在浅色毛玻璃上会读成深灰；
+    /// 这里把 alpha 顶到 1.0 得到不透明实色（浅色纯黑、深色纯白，仍随外观自适应）。其它风格保持原样。
+    private var titlePrimaryColor: NSColor {
+        TileView.cachedEffectiveStyle == .titles ? Appearance.fontColor.withAlphaComponent(1) : Appearance.fontColor
+    }
+
     private func baseTitleAttributes(_ forceClipping: Bool = false) -> [NSAttributedString.Key: Any] {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = label.alignment
         paragraphStyle.baseWritingDirection = .leftToRight
         paragraphStyle.lineBreakMode = forceClipping ? .byClipping : label.lineBreakMode
-        return [.foregroundColor: Appearance.fontColor, .font: Appearance.font, .paragraphStyle: paragraphStyle]
+        return [.foregroundColor: titlePrimaryColor, .font: Appearance.font, .paragraphStyle: paragraphStyle]
     }
 
     private func searchSpanRanges() -> [NSRange] {
