@@ -476,10 +476,13 @@ class TileView: FlippedView {
         return fullString.prefix(characterIndex).utf16.count
     }
 
-    /// titles 主文本色：系统 labelColor 是「黑 + 0.85 透明度」，叠在浅色毛玻璃上会读成深灰；
-    /// 这里把 alpha 顶到 1.0 得到不透明实色（浅色纯黑、深色纯白，仍随外观自适应）。其它风格保持原样。
+    /// titles 主文本色：需要不透明实色（浅色纯黑、深色纯白），labelColor 自带 0.85 alpha 叠在玻璃上偏软。
+    /// 不能写成 labelColor.withAlphaComponent(1)：该调用会按当前 NSAppearance.current 即时把动态色解析成静态色，
+    /// 而本属性在「构建 tile 内容」阶段求值（非 draw），此时 current 外观恒为 aqua（浅色）→ 会被烤成纯黑，
+    /// 深色模式下纯黑叠在深色玻璃上等于看不见。故按面板实际主题显式取黑/白，绕开即时解析。其它风格保持动态 labelColor。
     private var titlePrimaryColor: NSColor {
-        TileView.cachedEffectiveStyle == .titles ? Appearance.fontColor.withAlphaComponent(1) : Appearance.fontColor
+        guard TileView.cachedEffectiveStyle == .titles else { return Appearance.fontColor }
+        return Appearance.currentTheme == .dark ? .white : .black
     }
 
     private func baseTitleAttributes(_ forceClipping: Bool = false) -> [NSAttributedString.Key: Any] {
