@@ -11,9 +11,10 @@ class KeyboardEventsTestable {
 
 @discardableResult
 func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?, _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool, _ event: NSEvent? = nil) -> Bool {
-    // ⌘+数字 1–9：switcher 打开时直跳第 N 个可见窗口。用 ⌘ 修饰避免与搜索框输入数字冲突，
-    // 且放在搜索拦截之前，搜索编辑态下同样生效
-    if SwitcherSession.isActive, let keyCode, let modifiers, modifiers.contains(.command),
+    // ⌘+数字 1–9：titles 风格 switcher 打开时直跳第 N 个可见窗口（与右侧 ⌘N 徽标一致）。
+    // 用 ⌘ 修饰避免与搜索框输入数字冲突，且放在搜索拦截之前，搜索编辑态下同样生效
+    if SwitcherSession.isActive, Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles,
+       let keyCode, let modifiers, modifiers.contains(.command),
        let n = directSelectDigit(keyCode), let window = Windows.nthDisplayed(n - 1) {
         App.focusSelectedWindow(window)
         return true

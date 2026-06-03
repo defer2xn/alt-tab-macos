@@ -207,8 +207,26 @@ class Windows {
             session.hoveredIndex = nil
             TilesView.highlight(oldHovered)
         }
-        // 召唤时默认选中第一行（当前窗口），而非"下一个"——配合搜索优先的命令面板交互
-        updateSelectedAndHoveredWindowIndex(0)
+        // titles 命令面板风格：默认选中第一行（当前窗口）；其它风格保持原有"选中上一个窗口"的快速切换语义
+        if Preferences.effectiveAppearanceStyle(session.shortcutIndex) == .titles {
+            updateSelectedAndHoveredWindowIndex(0)
+            return
+        }
+        if Applications.frontmostPid != nil,
+           Preferences.windowOrder[session.shortcutIndex] != .recentlyFocused,
+           let lastFocusedOrderWindowIndex = getLastFocusedOrderWindowIndex() {
+            updateSelectedAndHoveredWindowIndex(lastFocusedOrderWindowIndex)
+        } else {
+            // edge-case: when the 2 most recently focused windows are both minimized, select the first
+            if list.count >= 2 && list[0].isMinimized && list[1].isMinimized {
+                updateSelectedAndHoveredWindowIndex(0)
+            } else {
+                cycleSelectedWindowIndex(1)
+                if session.selectedIndex == 0 {
+                    updateSelectedAndHoveredWindowIndex(0)
+                }
+            }
+        }
     }
 
     static func updateSelectedWindow() {

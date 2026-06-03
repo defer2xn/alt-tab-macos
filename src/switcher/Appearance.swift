@@ -174,7 +174,7 @@ class Appearance {
         windowPadding = 14
         windowCornerRadius = 23
         cellCornerRadius = 8
-        edgeInsetsSize = 6
+        edgeInsetsSize = 4
         windowMinWidthInRow = 0.6
         windowMaxWidthInRow = 0.9
         rowsCount = 1

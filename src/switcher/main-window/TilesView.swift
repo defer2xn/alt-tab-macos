@@ -51,8 +51,9 @@ class TilesView {
     static var isSearchModeOn: Bool { searchMode != .off }
     static var isSearchEditing: Bool { searchMode == .editing }
     static var isSearchLocked: Bool { searchMode == .locked }
-    /// 是否有有效搜索查询（决定搜索栏空态 vs 出结果态的导航/高亮行为）
-    static var hasSearchQuery: Bool { !Search.normalizedQuery(SwitcherSession.current?.searchQuery ?? "").isEmpty }
+    /// 是否有有效搜索查询（决定搜索栏空态 vs 出结果态的导航/高亮行为）。
+    /// 只判去空白后是否为空，避免在 highlight() 等热路径上做完整 Unicode 归一化
+    static var hasSearchQuery: Bool { !(SwitcherSession.current?.searchQuery ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     static func startSearchSession(_ startInSearchMode: Bool) {
         searchField.stringValue = ""
@@ -102,11 +103,13 @@ class TilesView {
         }
     }
 
-    /// 从搜索栏向下进入列表：收起搜索栏（转 .locked，保留查询），移走焦点环并高亮列表选中行
+    /// 从搜索栏向下进入列表：收起搜索栏（转 .locked，保留查询），移走焦点环并高亮列表选中行。
+    /// 解除"进搜索栏"时设的锁定——回到列表后松开 ⌘ 应恢复正常激活，而非意外停留
     static func exitSearchToList() {
         guard searchMode == .editing else { App.cycleSelection(.down); return }
         searchMode = .locked
         updateSearchFieldEditability()
+        SwitcherSession.current?.forceDoNothingOnRelease = false
         TilesPanel.shared.makeFirstResponder(nil) // 可靠移走搜索框焦点（去掉光标/焦点环）
         App.refreshUi(true)
     }
@@ -458,7 +461,8 @@ class TilesView {
     }
 
     private static func resolveAutoSize(_ widthMax: CGFloat) {
-        let searchReservedHeight: CGFloat = searchBarHeight() + 10
+        let searchFieldShown = TileView.cachedEffectiveStyle == .titles || searchMode != .off
+        let searchReservedHeight: CGFloat = searchFieldShown ? searchBarHeight() + 10 : 0
         let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReservedHeight())
         for size in [AppearanceSizePreference.large, .medium, .small] {
             Appearance.applySize(size)
@@ -592,7 +596,9 @@ class TilesView {
     private static func layoutParentViews(_ maxX: CGFloat, _ widthMax: CGFloat, _ maxY: CGFloat, _ labelHeight: CGFloat) {
         let searchBarHeight = searchBarHeight()
         let searchBottomPadding = CGFloat(10)
-        let searchReservedHeight = searchBarHeight + searchBottomPadding
+        // 搜索框：titles 风格常驻可见；其它风格仅搜索激活时显示，避免白占面板高度
+        let searchFieldShown = TileView.cachedEffectiveStyle == .titles || searchMode != .off
+        let searchReservedHeight = searchFieldShown ? searchBarHeight + searchBottomPadding : 0
         let footerReserved = footerReservedHeight()
         let heightMax = max(0, TilesPanel.maxThumbnailsHeight() - searchReservedHeight - footerReserved)
         let minSearchWidth = min(widthMax, 320)
@@ -614,19 +620,29 @@ class TilesView {
         scrollView.frame.size = NSSize(width: TilesView.thumbnailsWidth, height: scrollHeight)
         scrollView.frame.origin = CGPoint(x: originX, y: originY + appIconsBottomViewportPadding * 2)
         scrollView.contentView.frame.size = scrollView.frame.size
-        if searchField.superview !== contentView {
-            contentView.addSubview(searchField)
+        searchField.isHidden = !searchFieldShown
+        if searchFieldShown {
+            // 动态宽度：搜索（编辑态）时展开为全宽 + 完整占位符，空闲时收成居中窄药丸 + 短占位符
+            let expandedWidth = minSearchWidth
+            let collapsedWidth = (expandedWidth * 0.5).rounded()
+            let editing = searchMode == .editing
+            let searchWidth = editing ? expandedWidth : collapsedWidth
+            searchField.placeholderString = editing ? "搜索窗口、应用或文件" : "搜索"
+            let searchX = originX + (TilesView.thumbnailsWidth - searchWidth) * 0.5
+            let targetSearchFrame = NSRect(x: searchX, y: frameHeight - Appearance.windowPadding - searchBarHeight, width: searchWidth, height: searchBarHeight)
+            // 宽度变化（展开/收起）且面板已显示时做缓动；首次召唤（alpha=0）或无变化时瞬时，避免抖动
+            if abs(searchField.frame.width - searchWidth) > 1 && TilesPanel.shared.alphaValue > 0 {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.18
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    ctx.allowsImplicitAnimation = true
+                    searchField.animator().frame = targetSearchFrame
+                }
+            } else {
+                searchField.frame = targetSearchFrame
+                searchField.layoutSubtreeIfNeeded()
+            }
         }
-        // 动态宽度：搜索（编辑态）时展开为全宽 + 完整占位符，空闲时收成居中窄药丸 + 短占位符
-        let expandedWidth = minSearchWidth
-        let collapsedWidth = (expandedWidth * 0.5).rounded()
-        let editing = searchMode == .editing
-        let searchWidth = editing ? expandedWidth : collapsedWidth
-        searchField.placeholderString = editing ? "搜索窗口、应用或文件" : "搜索"
-        searchField.frame.size = NSSize(width: searchWidth, height: searchBarHeight)
-        let searchX = originX + (TilesView.thumbnailsWidth - searchWidth) * 0.5
-        searchField.frame.origin = CGPoint(x: searchX, y: frameHeight - Appearance.windowPadding - searchBarHeight)
-        searchField.layoutSubtreeIfNeeded()
         if footerReserved > 0 {
             footerView.isHidden = false
             footerView.frame = CGRect(x: originX, y: Appearance.windowPadding, width: TilesView.thumbnailsWidth, height: footerHeight())
