@@ -138,7 +138,10 @@ class Window {
         CFRunLoopAddSource(BackgroundWork.accessibilityEventsThread.runLoop, AXObserverGetRunLoopSource(axObserver), .commonModes)
     }
 
-    func refreshThumbnail(_ screenshot: CALayerContents) {
+    func refreshThumbnail(_ screenshot: CALayerContents, _ fullRes: Bool = true) {
+        // 正被预览的窗口只接受全分辨率截图：在它成为预览目标之前入队的「在途低分辨率截图」可能晚到，
+        // 会把已清晰的预览刷糊并滞留。直接丢弃这类低分辨率帧（该窗口必有一次全分辨率截图在路上/已到）。
+        if !fullRes, let previewed = WindowThumbnails.previewedWid, cgWindowId == previewed { return }
         thumbnail = screenshot
         if !SwitcherSession.isActive || !shouldShowTheUser { return }
         if let position, let size, let cgWid = cgWindowId,
@@ -288,12 +291,12 @@ class Window {
         return application.localizedName ?? ""
     }
 
-    func updateSpacesAndScreen(_ windowToSpacesMap: [CGWindowID: [CGSSpaceID]]? = nil) {
+    func updateSpacesAndScreen(_ windowToSpacesMap: [CGWindowID: [CGSSpaceID]]? = nil, _ screens: [NSScreen] = NSScreen.screens) {
         // macOS bug: if you tab a window, then move the tab group to another space, other tabs from the tab group will stay on the current space
         // you can use the Dock to focus one of the other tabs and it will teleport that tab in the current space, proving that it's a macOS bug
         // note: for some reason, it behaves differently if you minimize the tab group after moving it to another space
         updateSpaces(windowToSpacesMap)
-        updateScreenId()
+        updateScreenId(screens)
     }
 
     private func updateSpaces(_ windowToSpacesMap: [CGWindowID: [CGSSpaceID]]? = nil) {
@@ -309,8 +312,8 @@ class Window {
         recomputeIsInvisible()
     }
 
-    private func updateScreenId() {
-        screenId = NSScreen.screens.first { isOnScreen($0) }?.cachedUuid()
+    private func updateScreenId(_ screens: [NSScreen] = NSScreen.screens) {
+        screenId = screens.first { isOnScreen($0) }?.cachedUuid()
     }
 
     /// window may not be visible on that screen (e.g. the window is not on the current Space)

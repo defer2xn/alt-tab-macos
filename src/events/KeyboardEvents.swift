@@ -80,8 +80,20 @@ class KeyboardEvents {
     }
 
     static func addEventHandlers() {
+        registerDirectSelectJump()
         addLocalMonitorForKeyDownAndKeyUp()
         addCgEventTap()
+    }
+
+    // app 侧实现 ⌘数字直跳：仅 titles 风格生效，聚焦第 n 个可见窗口。逻辑放此（app 目标）以保持
+    // KeyboardEventsTestable 不引用 Preferences/Windows/App 等 app 专属符号，unit-tests 目标方可独立编译。
+    private static func registerDirectSelectJump() {
+        KeyboardEventsTestable.directSelectJump = { n in
+            guard Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles,
+                  let window = Windows.nthDisplayed(n - 1) else { return false }
+            App.focusSelectedWindow(window)
+            return true
+        }
     }
 
     private static func unregisterHotKeyIfNeeded(_ controlId: String, _ shortcut: Shortcut) {

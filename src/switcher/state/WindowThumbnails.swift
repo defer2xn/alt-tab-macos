@@ -3,15 +3,31 @@ import Cocoa
 /// Off-main-thread screenshot capture for window thumbnails, plus the
 /// "preview the selected window" overlay shown next to the switcher panel.
 enum WindowThumbnails {
+    /// 当前正被 PreviewPanel 预览的窗口 wid（启用预览时 = 选中窗口）。只有它需要全分辨率截图：
+    /// tiles 在 titles/appIcons 风格根本不显示缩略图，thumbnails 风格也只按缩略图尺寸显示，全分辨率仅服务预览面板。
+    /// 主线程读写；oneTimeScreenshots（主线程快照）据此让批量截图只给它截全分辨率、其余截缩略图尺寸，省下成倍内存。
+    static var previewedWid: CGWindowID?
+
     static func previewSelectedIfNeeded() {
-        if let session = SwitcherSession.current, ScreenRecordingPermission.status == .granted
-               && Preferences.effectivePreviewSelectedWindow(session.shortcutIndex) && !Preferences.onlyShowApplications(session.shortcutIndex)
-               && TilesPanel.shared.isKeyWindow,
-           let window = Windows.selectedWindow(),
-           let id = window.cgWindowId,
-           let thumbnail = window.thumbnail,
-           let position = window.position,
-           let size = window.size {
+        let selected: Window?
+        if let session = SwitcherSession.current, ScreenRecordingPermission.status == .granted,
+           Preferences.effectivePreviewSelectedWindow(session.shortcutIndex), !Preferences.onlyShowApplications(session.shortcutIndex),
+           TilesPanel.shared.isKeyWindow {
+            selected = Windows.selectedWindow()
+        } else {
+            selected = nil
+        }
+        let newPreviewedWid = selected?.cgWindowId
+        if newPreviewedWid != previewedWid {
+            previewedWid = newPreviewedWid
+            // 被预览窗口变化时补一次全分辨率截图；完成后 refreshThumbnail→PreviewPanel.updateIfShowing 让预览变清晰。
+            // 不会回环：refreshThumbnail 只刷新显示、不触发截图，且本判断仅在 wid 变化时进入。
+            if let selected, let id = newPreviewedWid {
+                refreshAsync([selected], .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: [id])
+            }
+        }
+        if let selected, let id = selected.cgWindowId, let thumbnail = selected.thumbnail,
+           let position = selected.position, let size = selected.size {
             PreviewPanel.show(id, thumbnail, position, size)
         } else {
             PreviewPanel.shared.orderOut(nil)

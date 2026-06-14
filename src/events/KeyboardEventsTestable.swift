@@ -1,6 +1,10 @@
 import ShortcutRecorder
 
 class KeyboardEventsTestable {
+    /// app 侧注入（见 KeyboardEvents.addEventHandlers）：titles 风格下聚焦第 n 个可见窗口并返回 true。
+    /// 为 nil 时（如 unit-tests 目标，不含 Windows/App 等符号）⌘数字直跳静默失效，保证此文件可独立编译。
+    static var directSelectJump: ((Int) -> Bool)?
+
     static var globalShortcutsIds: [String: Int] {
         var ids = [String: Int]()
         (0..<Preferences.maxShortcutCount).forEach { ids[Preferences.indexToName("nextWindowShortcut", $0)] = $0 }
@@ -12,11 +16,12 @@ class KeyboardEventsTestable {
 @discardableResult
 func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?, _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool, _ event: NSEvent? = nil) -> Bool {
     // ⌘+数字 1–9：titles 风格 switcher 打开时直跳第 N 个可见窗口（与右侧 ⌘N 徽标一致）。
-    // 用 ⌘ 修饰避免与搜索框输入数字冲突，且放在搜索拦截之前，搜索编辑态下同样生效
-    if SwitcherSession.isActive, Preferences.effectiveAppearanceStyle(SwitcherSession.activeShortcutIndex) == .titles,
-       let keyCode, let modifiers, modifiers.contains(.command),
-       let n = directSelectDigit(keyCode), let window = Windows.nthDisplayed(n - 1) {
-        App.focusSelectedWindow(window)
+    // 用 ⌘ 修饰避免与搜索框输入数字冲突，且放在搜索拦截之前，搜索编辑态下同样生效。
+    // 必须排除 ⇧/⌃：否则 ⌘⇧3/⌘⇧4/⌘⇧5 截图（keycode 含数字键 21=4 等）会被当成「跳第 N 窗口」吞掉。
+    // 纯键码/修饰判断留在此（可测试）；「titles 风格 + 取第 N 窗口并聚焦」依赖 app 专属符号，走 directSelectJump 钩子。
+    if SwitcherSession.isActive, let keyCode, let modifiers,
+       modifiers.contains(.command), !modifiers.contains(.shift), !modifiers.contains(.control),
+       let n = directSelectDigit(keyCode), KeyboardEventsTestable.directSelectJump?(n) == true {
         return true
     }
     if let event, shouldAbsorbSearchEditingKeyDown(event) {

@@ -409,24 +409,26 @@ class TileView: FlippedView {
         // 分层着色先于搜索高亮：搜索高亮再覆盖 .foregroundColor，匹配字符仍显示高亮前景色而非次级灰
         if let appNameLen = appNameCharCount() {
             let appIdx = Set(0..<appNameLen)
-            for range in visibleHighlightRanges(truncation.visibleToOriginal, appIdx) {
+            for range in visibleHighlightRanges(truncation.visibleToOriginal, appIdx, truncation.text) {
                 attributed.addAttribute(.font, value: Appearance.appNameFont, range: range)
             }
             if appNameLen < titleLength {
                 let secondaryIdx = Set(appNameLen..<titleLength)
-                for range in visibleHighlightRanges(truncation.visibleToOriginal, secondaryIdx) {
+                for range in visibleHighlightRanges(truncation.visibleToOriginal, secondaryIdx, truncation.text) {
                     attributed.addAttribute(.foregroundColor, value: Appearance.secondaryFontColor, range: range)
                 }
             }
         }
-        for range in visibleHighlightRanges(truncation.visibleToOriginal, highlightedIndexes) {
+        for range in visibleHighlightRanges(truncation.visibleToOriginal, highlightedIndexes, truncation.text) {
             attributed.addAttribute(TileTitleView.searchHighlightBackgroundKey, value: Appearance.searchMatchHighlightColor, range: range)
             attributed.addAttribute(.foregroundColor, value: Appearance.searchMatchForegroundColor, range: range)
         }
         let visibleOriginalIndexes = Set(truncation.visibleToOriginal.compactMap { $0 })
         let hasHiddenHighlights = highlightedIndexes.contains { !visibleOriginalIndexes.contains($0) }
         if hasHiddenHighlights, let ellipsisIndex = truncation.ellipsisIndex {
-            let range = NSRange(location: ellipsisIndex, length: 1)
+            let loc = utf16Offset(in: truncation.text, characterIndex: ellipsisIndex)
+            let end = utf16Offset(in: truncation.text, characterIndex: ellipsisIndex + 1)
+            let range = NSRange(location: loc, length: end - loc)
             attributed.addAttribute(TileTitleView.searchHighlightBackgroundKey, value: Appearance.searchMatchHighlightColor, range: range)
             attributed.addAttribute(.foregroundColor, value: Appearance.searchMatchForegroundColor, range: range)
         }
@@ -532,9 +534,16 @@ class TileView: FlippedView {
         return indexes
     }
 
-    private func visibleHighlightRanges(_ visibleToOriginal: [Int?], _ highlightedIndexes: Set<Int>) -> [NSRange] {
+    /// 高亮 run 以「显示文本的 Character 下标」累积，但 NSAttributedString 用 UTF-16 偏移寻址：
+    /// emoji/旗帜等星平面字符 Character 数 ≠ utf16 数，必须按 `text` 把字符下标换算成 UTF-16，否则高亮错位。
+    private func visibleHighlightRanges(_ visibleToOriginal: [Int?], _ highlightedIndexes: Set<Int>, _ text: String) -> [NSRange] {
         var ranges = [NSRange]()
         var runStart: Int?
+        func appendRun(_ startChar: Int, _ endChar: Int) {
+            let loc = utf16Offset(in: text, characterIndex: startChar)
+            let end = utf16Offset(in: text, characterIndex: endChar)
+            ranges.append(NSRange(location: loc, length: end - loc))
+        }
         for (displayIndex, originalIndex) in visibleToOriginal.enumerated() {
             let highlighted = originalIndex.flatMap { highlightedIndexes.contains($0) } ?? false
             if highlighted {
@@ -542,12 +551,12 @@ class TileView: FlippedView {
                     runStart = displayIndex
                 }
             } else if let runStartValue = runStart {
-                ranges.append(NSRange(location: runStartValue, length: displayIndex - runStartValue))
+                appendRun(runStartValue, displayIndex)
                 runStart = nil
             }
         }
         if let runStart {
-            ranges.append(NSRange(location: runStart, length: visibleToOriginal.count - runStart))
+            appendRun(runStart, visibleToOriginal.count)
         }
         return ranges
     }

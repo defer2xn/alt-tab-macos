@@ -187,6 +187,33 @@ final class KeyboardEventsUtilsTests: XCTestCase {
         XCTAssertEqual(ControlsTab.shortcutsActionsTriggered, [])
     }
 
+    // ⌘+数字直跳：⌘4（keycode 0x15）应调用 directSelectJump 跳到第 4 个窗口并吸收事件。
+    func testCommandDigitInvokesDirectSelectJump() throws {
+        resetState()
+        SwitcherSession.current = SwitcherSession()
+        var jumpedTo: Int?
+        KeyboardEventsTestable.directSelectJump = { n in jumpedTo = n; return true }
+        defer { KeyboardEventsTestable.directSelectJump = nil }
+        ModifierFlags.current = [.command]
+        let absorbed = handleKeyboardEvent(nil, nil, 0x15, [.command], false)
+        XCTAssertEqual(jumpedTo, 4)
+        XCTAssertTrue(absorbed)
+        XCTAssertEqual(ControlsTab.shortcutsActionsTriggered, [])
+    }
+
+    // 回归：⌘⇧4 系统截图（keycode 0x15 = 数字 4）绝不能被当成「跳第 4 窗口」吞掉，directSelectJump 不应被调用。
+    func testCommandShiftDigitDoesNotHijackScreenshotShortcut() throws {
+        resetState()
+        SwitcherSession.current = SwitcherSession()
+        var jumped = false
+        KeyboardEventsTestable.directSelectJump = { _ in jumped = true; return true }
+        defer { KeyboardEventsTestable.directSelectJump = nil }
+        ModifierFlags.current = [.command, .shift]
+        let absorbed = handleKeyboardEvent(nil, nil, 0x15, [.command, .shift], false)
+        XCTAssertFalse(jumped)
+        XCTAssertFalse(absorbed)
+    }
+
     private let escapeKeycode: UInt32 = 53 // kVK_Escape
 
     private let keycodeMap: [Character: UInt32] = [

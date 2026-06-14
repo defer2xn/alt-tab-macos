@@ -71,6 +71,7 @@ class App: AppCenterApplication {
         TrackpadEvents.reset()
         hideTilesPanelWithoutChangingKeyWindow()
         if !keepPreview {
+            WindowThumbnails.previewedWid = nil
             PreviewPanel.shared.orderOut(nil)
         }
         Tooltips.hideAll()
@@ -286,6 +287,7 @@ class App: AppCenterApplication {
                 moveCursorToSelectedWindow(window)
             }
         } else {
+            WindowThumbnails.previewedWid = nil
             PreviewPanel.shared.orderOut(nil)
         }
     }

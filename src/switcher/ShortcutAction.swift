@@ -19,7 +19,9 @@ enum ShortcutActions {
         ShortcutAction(id: "vimCycleDown", perform: { App.cycleSelection(.down) }),
         ShortcutAction(id: "cancelShortcut", perform: {
             guard let session = SwitcherSession.current else { return }
-            if TilesView.isSearchModeOn && Preferences.effectiveShortcutStyle(session.shortcutIndex) != .searchOnRelease {
+            // 仅当「正在编辑搜索」或「有非空查询」时，Esc 先退出搜索；.locked + 空查询（下移进列表后）
+            // 已无可退的搜索内容，应直接关闭，否则要按两次 Esc。
+            if (TilesView.isSearchEditing || TilesView.hasSearchQuery) && Preferences.effectiveShortcutStyle(session.shortcutIndex) != .searchOnRelease {
                 TilesView.disableSearchMode()
             } else {
                 App.hideUi()

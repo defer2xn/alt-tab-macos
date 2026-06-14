@@ -12,6 +12,7 @@ class WindowCaptureScreenshots {
         let window: Window
         let size: CGSize
         let scaleFactor: CGFloat
+        let fullRes: Bool
     }
 
     static func oneTimeScreenshots(_ windowsToScreenshot: [Window], _ source: RefreshCausedBy, prioritizedIds: Set<CGWindowID>? = nil) {
@@ -21,6 +22,9 @@ class WindowCaptureScreenshots {
         // races with main-thread mutation and can corrupt the heap.
         // Trade-off: size is fixed at call time, so a window resized between snapshot and capture will be captured
         // at the old size. Acceptable because the next refresh will re-snapshot.
+        // 仅「正在被预览的窗口」需要全分辨率（见 WindowThumbnails.previewedWid）；其余截缩略图尺寸即可，
+        // 省下成倍内存。previewedWid 在主线程维护，这里也在主线程读取，无竞态。
+        let previewedWid = WindowThumbnails.previewedWid
         var requests = [CGWindowID: CaptureRequest]()
         for window in windowsToScreenshot {
             guard let wid = window.cgWindowId, let size = window.size else { continue }
@@ -30,7 +34,7 @@ class WindowCaptureScreenshots {
             } else {
                 scaleFactor = NSScreen.preferred.backingScaleFactor
             }
-            requests[wid] = CaptureRequest(window: window, size: size, scaleFactor: scaleFactor)
+            requests[wid] = CaptureRequest(window: window, size: size, scaleFactor: scaleFactor, fullRes: wid == previewedWid)
         }
         guard !requests.isEmpty else { return }
         let prioritized = prioritizedIds ?? []
@@ -96,10 +100,11 @@ class WindowCaptureScreenshots {
     private static func oneTimeCapture(_ scWindow: SCWindow, _ request: CaptureRequest, _ source: RefreshCausedBy, _ isPrioritized: Bool = false) {
         let size = request.size
         let scaleFactor = request.scaleFactor
+        let fullRes = request.fullRes // 值类型，单独取出避免在内层 completion 强引用 request（保住 [weak window]）
         // [weak window] avoids keeping a closed Window alive while the capture is queued or in-flight with the OS
         Applications.captureThrottler.throttleOrProceed(key: "capture-wid-\(scWindow.windowID)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
             guard !App.isTerminating, let window else { return }
-            let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false)
+            let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false, request.fullRes)
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
             ActiveWindowCaptures.increment()
             SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { [weak window] sampleBuffer, error in
@@ -110,7 +115,7 @@ class WindowCaptureScreenshots {
                 guard let pixelBuffer = sampleBuffer.pixelBuffer() ?? sampleBuffer.imageBuffer else { Logger.error { "\(window.debugId) no pixelBuffer" }; return }
                 DispatchQueue.main.async {
                     guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                    window.refreshThumbnail(.pixelBuffer(pixelBuffer))
+                    window.refreshThumbnail(.pixelBuffer(pixelBuffer), fullRes)
                 }
             }
         }
@@ -280,9 +285,9 @@ class WindowCaptureScreenshotsPrivateApi {
 extension SCStreamConfiguration {
     // size/scaleFactor are snapshotted on the main thread by the caller; we do not touch Window state here
     // (Window properties are mutated on main and would race with this background work).
-    static func forWindow(_ scWindow: SCWindow, _ size: CGSize, _ scaleFactor: CGFloat, _ video: Bool) -> SCStreamConfiguration {
+    static func forWindow(_ scWindow: SCWindow, _ size: CGSize, _ scaleFactor: CGFloat, _ video: Bool, _ fullRes: Bool) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
-        config.setWindowSize(size, scaleFactor)
+        config.setWindowSize(size, scaleFactor, fullRes)
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = false
         // if video {
@@ -298,15 +303,13 @@ extension SCStreamConfiguration {
         return config
     }
 
-    private func setWindowSize(_ size: CGSize, _ scaleFactor: CGFloat) {
+    private func setWindowSize(_ size: CGSize, _ scaleFactor: CGFloat, _ fullRes: Bool) {
         // window.size is the logical size and doesn't change with scaleFactor. We need to correct for this as we need to capture more or less pixels depending on DPI.
         let originalSize = NSSize(width: size.width * scaleFactor, height: size.height * scaleFactor)
         guard originalSize.width > 0, originalSize.height > 0 else { return }
-        // Use full-resolution capture if any shortcut has preview-selected-window enabled (could be
-        // the global or a per-shortcut override). Background captures aren't tied to a specific
-        // shortcut, so we err on the side of full-res when any shortcut might need it.
-        let anyPreview = (0...Preferences.maxShortcutCount).contains { Preferences.effectivePreviewSelectedWindow($0) }
-        if anyPreview {
+        // 全分辨率仅用于「正被预览的那个窗口」（预览面板按窗口真实逻辑尺寸 1:1 显示，需要 logical×scale 的像素）。
+        // 其余窗口只在 tiles 里按缩略图尺寸显示，截缩略图尺寸即可，省下成倍 IOSurface 内存。由调用方按 previewedWid 决定。
+        if fullRes {
             width = Int(originalSize.width)
             height = Int(originalSize.height)
         } else {

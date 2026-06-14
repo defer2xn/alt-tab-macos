@@ -69,6 +69,9 @@ class Windows {
     }
 
     static func voiceOverWindow(_ windowIndex: Int = (SwitcherSession.current?.selectedIndex ?? 0)) {
+        // 仅 VoiceOver 开启时才需要把 tile 设为 firstResponder 供朗读；否则每次选中变化都白排一个
+        // 10ms asyncAfter + makeFirstResponder（会走 AppKit key-view-loop，注释里也说拖慢 show）。
+        guard NSWorkspace.shared.isVoiceOverEnabled else { return }
         guard SwitcherSession.isActive && TilesPanel.shared.isKeyWindow else { return }
         if TilesView.isSearchEditing { return }
         // it seems that sometimes makeFirstResponder is called before the view is visible
@@ -94,8 +97,10 @@ class Windows {
         // computed-property access rebuilds the underlying array via N×`CachedUserDefaults.macroPref`
         // calls. Snapshot them once and pass into the per-window helper.
         let filters = WindowFilters.snapshot()
+        // NSScreen.screens 在本同步循环内是不变量（不处理事件就不会刷新），逐窗口重取纯属浪费；提到循环外取一次。
+        let screens = NSScreen.screens
         for window in list {
-            window.updateSpacesAndScreen(windowToSpacesMap)
+            window.updateSpacesAndScreen(windowToSpacesMap, screens)
             refreshIfWindowShouldBeShownToTheUser(window, filters)
         }
         refreshWhichWindowsToShowTheUser()
@@ -208,8 +213,10 @@ class Windows {
             TilesView.highlight(oldHovered)
         }
         // titles 命令面板风格：默认选中第一行（当前窗口）；其它风格保持原有"选中上一个窗口"的快速切换语义
+        // 取首个「可显示」窗口，避免 list[0] 被过滤（如 appsToShow=.nonActive 隐藏最前窗口）时
+        // updateSelectedAndHoveredWindowIndex(0) 因 shouldDisplay 失败而静默 no-op、整列无选中
         if Preferences.effectiveAppearanceStyle(session.shortcutIndex) == .titles {
-            updateSelectedAndHoveredWindowIndex(0)
+            updateSelectedAndHoveredWindowIndex(visibleWindowIndexes().first ?? 0)
             return
         }
         if Applications.frontmostPid != nil,
@@ -340,20 +347,23 @@ class Windows {
     static func cycleSelectedWindowIndex(_ step: Int, allowWrap: Bool = true) {
         guard let session = SwitcherSession.current else { return }
         guard list.contains(where: { shouldDisplay($0) }) else { return }
+        // removeWindows 收缩 list 时不同步修正 session.selectedIndex（要等节流的 refreshOpenUiAfterExternalEvent
+        // 才纠正），这中间若来一次 trackpad/键盘 cycle，selectedIndex 可能 >= list.count → 裸下标崩溃。此处夹紧。
+        let currentIndex = max(0, min(session.selectedIndex, list.count - 1))
         let nextIndex = selectedWindowIndexAfterCycling(step)
         // don't wrap-around at the end, if key-repeat
-        if (((step > 0 && nextIndex < session.selectedIndex) || (step < 0 && nextIndex > session.selectedIndex)) &&
+        if (((step > 0 && nextIndex < currentIndex) || (step < 0 && nextIndex > currentIndex)) &&
             (!allowWrap || ATShortcut.lastEventIsARepeat || !KeyRepeatTimer.timerIsSuspended))
                // don't cycle to another row, if !allowWrap
-               || (!allowWrap && list[nextIndex].rowIndex != list[session.selectedIndex].rowIndex) {
+               || (!allowWrap && list[nextIndex].rowIndex != list[currentIndex].rowIndex) {
             return
         }
         updateSelectedAndHoveredWindowIndex(nextIndex)
     }
 
     static func selectedWindowIndexAfterCycling(_ step: Int) -> Int {
-        let currentIndex = SwitcherSession.current?.selectedIndex ?? 0
-        if list.count == 0 || !list.contains(where: { shouldDisplay($0) }) { return currentIndex }
+        if list.count == 0 || !list.contains(where: { shouldDisplay($0) }) { return SwitcherSession.current?.selectedIndex ?? 0 }
+        let currentIndex = max(0, min(SwitcherSession.current?.selectedIndex ?? 0, list.count - 1))
         var iterations = 0
         var targetIndex = currentIndex
         repeat {
@@ -388,7 +398,10 @@ class Windows {
 
     /// reordered list based on preferences, keeping the original index
     private static func sort() {
-        let trimmedQuery = Search.normalizedQuery((SwitcherSession.current?.searchQuery ?? ""))
+        // 传给 Search 的须是「原始查询」（与 shouldDisplay 一致），让 tierMatch 拿到真实大小写算加分、缓存键也一致；
+        // trimmedQuery 仅用于判断是否处于搜索态。
+        let rawQuery = SwitcherSession.current?.searchQuery ?? ""
+        let trimmedQuery = Search.normalizedQuery(rawQuery)
         let shortcutIndex = (SwitcherSession.current?.shortcutIndex ?? 0)
         let showWindowlessApps = Preferences.showWindowlessApps(shortcutIndex)
         let showHiddenWindows = Preferences.showHiddenWindows(shortcutIndex)
@@ -396,11 +409,11 @@ class Windows {
         let sortType = Preferences.windowOrder(shortcutIndex)
         list.sort {
             if !trimmedQuery.isEmpty {
-                let matches0 = Search.matches($0, query: trimmedQuery)
-                let matches1 = Search.matches($1, query: trimmedQuery)
+                let matches0 = Search.matches($0, query: rawQuery)
+                let matches1 = Search.matches($1, query: rawQuery)
                 if matches0 != matches1 { return matches0 }
-                let score0 = Search.relevance(for: $0, query: trimmedQuery)
-                let score1 = Search.relevance(for: $1, query: trimmedQuery)
+                let score0 = Search.relevance(for: $0, query: rawQuery)
+                let score1 = Search.relevance(for: $1, query: rawQuery)
                 if score0 != score1 { return score0 > score1 }
                 return $0.lastFocusOrder < $1.lastFocusOrder
             }
