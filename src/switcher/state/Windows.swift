@@ -374,6 +374,37 @@ class Windows {
         return targetIndex
     }
 
+    /// 预览预取：返回当前选中窗口在导航顺序上前后各 radius 个「可显示」窗口（去重、不含选中本身、不含 windowless）。
+    /// 给这些相邻窗口提前补全分辨率截图，使快速连切到相邻窗口时预览已就绪、不再瞬间模糊。
+    /// 步进/跳过不可显示/绕回的规则与 selectedWindowIndexAfterCycling 一致，确保与方向键实际切换顺序对齐。
+    static func neighborWindowsForPreviewPrefetch(_ radius: Int = 2) -> [Window] {
+        guard let session = SwitcherSession.current, list.contains(where: { shouldDisplay($0) }) else { return [] }
+        let count = list.count
+        let currentIndex = max(0, min(session.selectedIndex, count - 1))
+        var result = [Window]()
+        var seen = Set<CGWindowID>()
+        if let selectedWid = list[currentIndex].cgWindowId { seen.insert(selectedWid) }
+        for step in [1, -1] {
+            var index = currentIndex
+            var found = 0
+            var iterations = 0
+            while found < radius && iterations < count {
+                iterations += 1
+                let next = (index + step) % count
+                index = next < 0 ? count + next : next
+                if index == currentIndex { break }
+                let window = list[index]
+                guard shouldDisplay(window) else { continue }
+                found += 1
+                if let wid = window.cgWindowId, !window.isWindowlessApp, !seen.contains(wid) {
+                    seen.insert(wid)
+                    result.append(window)
+                }
+            }
+        }
+        return result
+    }
+
     /// lastFocusOrder methods
     //////////////////////////////
 
@@ -562,6 +593,7 @@ class Windows {
                 AXCallScheduler.shared.removeEntries(withPrefix: "wid-\(wid)-")
                 Applications.windowListUpdateThrottler.removeEntries(withPrefix: "\(wid)-")
                 Applications.captureThrottler.removeEntry(withKey: "capture-wid-\(wid)")
+                Applications.captureThrottler.removeEntry(withKey: "capture-wid-\(wid)-fullRes")
             }
             // Detach the per-window AX observer's runloop source. Without this the AX events
             // thread's runloop accumulates one orphaned source per window-ever-opened (leak #1,

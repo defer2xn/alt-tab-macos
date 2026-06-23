@@ -22,9 +22,9 @@ class WindowCaptureScreenshots {
         // races with main-thread mutation and can corrupt the heap.
         // Trade-off: size is fixed at call time, so a window resized between snapshot and capture will be captured
         // at the old size. Acceptable because the next refresh will re-snapshot.
-        // 仅「正在被预览的窗口」需要全分辨率（见 WindowThumbnails.previewedWid）；其余截缩略图尺寸即可，
-        // 省下成倍内存。previewedWid 在主线程维护，这里也在主线程读取，无竞态。
-        let previewedWid = WindowThumbnails.previewedWid
+        // 仅「被预览窗口 + 导航相邻的预取窗口」需要全分辨率（见 WindowThumbnails.fullResWids）；其余截缩略图尺寸即可，
+        // 省下成倍内存。fullResWids 在主线程维护，这里也在主线程读取，无竞态。
+        let fullResWids = WindowThumbnails.fullResWids
         var requests = [CGWindowID: CaptureRequest]()
         for window in windowsToScreenshot {
             guard let wid = window.cgWindowId, let size = window.size else { continue }
@@ -34,7 +34,7 @@ class WindowCaptureScreenshots {
             } else {
                 scaleFactor = NSScreen.preferred.backingScaleFactor
             }
-            requests[wid] = CaptureRequest(window: window, size: size, scaleFactor: scaleFactor, fullRes: wid == previewedWid)
+            requests[wid] = CaptureRequest(window: window, size: size, scaleFactor: scaleFactor, fullRes: fullResWids.contains(wid))
         }
         guard !requests.isEmpty else { return }
         let prioritized = prioritizedIds ?? []
@@ -101,8 +101,13 @@ class WindowCaptureScreenshots {
         let size = request.size
         let scaleFactor = request.scaleFactor
         let fullRes = request.fullRes // 值类型，单独取出避免在内层 completion 强引用 request（保住 [weak window]）
+        // 全分辨率补截只服务被预览的那个窗口，必须和同一 wid 的缩略图截图分用不同的节流键：
+        // show/导航时整批窗口刚按缩略图尺寸截过，占用了 "capture-wid-<wid>" 的 200ms 配额；
+        // 若全分辨率补截共用该键，会被 scheduleTail 推迟最多 200ms，预览就停在缩略图重采样的模糊态。
+        // 独立键仍对全分辨率截图自身限频 200ms，不会因此连发而冲击 OS 截图调用。
+        let throttleKey = fullRes ? "capture-wid-\(scWindow.windowID)-fullRes" : "capture-wid-\(scWindow.windowID)"
         // [weak window] avoids keeping a closed Window alive while the capture is queued or in-flight with the OS
-        Applications.captureThrottler.throttleOrProceed(key: "capture-wid-\(scWindow.windowID)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
+        Applications.captureThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
             guard !App.isTerminating, let window else { return }
             let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false, request.fullRes)
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)

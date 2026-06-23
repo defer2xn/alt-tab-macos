@@ -139,9 +139,9 @@ class Window {
     }
 
     func refreshThumbnail(_ screenshot: CALayerContents, _ fullRes: Bool = true) {
-        // 正被预览的窗口只接受全分辨率截图：在它成为预览目标之前入队的「在途低分辨率截图」可能晚到，
-        // 会把已清晰的预览刷糊并滞留。直接丢弃这类低分辨率帧（该窗口必有一次全分辨率截图在路上/已到）。
-        if !fullRes, let previewed = WindowThumbnails.previewedWid, cgWindowId == previewed { return }
+        // 被预览窗口及其预取相邻窗口只接受全分辨率截图：它们成为全分辨率目标之前入队的「在途低分辨率截图」
+        // 可能晚到，会把已清晰的（或预取好的）帧刷糊并滞留。直接丢弃这类低分辨率帧（这些窗口必有一次全分辨率截图在路上/已到）。
+        if !fullRes, let wid = cgWindowId, WindowThumbnails.fullResWids.contains(wid) { return }
         thumbnail = screenshot
         if !SwitcherSession.isActive || !shouldShowTheUser { return }
         if let position, let size, let cgWid = cgWindowId,

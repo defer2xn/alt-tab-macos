@@ -3,10 +3,12 @@ import Cocoa
 /// Off-main-thread screenshot capture for window thumbnails, plus the
 /// "preview the selected window" overlay shown next to the switcher panel.
 enum WindowThumbnails {
-    /// 当前正被 PreviewPanel 预览的窗口 wid（启用预览时 = 选中窗口）。只有它需要全分辨率截图：
-    /// tiles 在 titles/appIcons 风格根本不显示缩略图，thumbnails 风格也只按缩略图尺寸显示，全分辨率仅服务预览面板。
-    /// 主线程读写；oneTimeScreenshots（主线程快照）据此让批量截图只给它截全分辨率、其余截缩略图尺寸，省下成倍内存。
+    /// 当前正被 PreviewPanel 预览的窗口 wid（启用预览时 = 选中窗口）。仅它会显示在预览面板，
+    /// refreshThumbnail 据此丢弃晚到的低分辨率帧，避免把已清晰的预览刷糊。主线程读写。
     static var previewedWid: CGWindowID?
+    /// 允许按全分辨率截图的窗口集合 = 被预览窗口 + 导航相邻的预取窗口。oneTimeScreenshots（主线程快照）
+    /// 据此决定哪些截全分辨率、其余截缩略图尺寸。集合上界 = 1 + 2×radius，内存仍受控。主线程读写。
+    static var fullResWids = Set<CGWindowID>()
 
     static func previewSelectedIfNeeded() {
         let selected: Window?
@@ -18,12 +20,19 @@ enum WindowThumbnails {
             selected = nil
         }
         let newPreviewedWid = selected?.cgWindowId
-        if newPreviewedWid != previewedWid {
+        // 预取相邻窗口：被预览窗口 + 导航方向前后各若干个窗口都按全分辨率截，快速连切到相邻窗口时
+        // 其全分辨率已就绪，不必等按需补截，消除瞬间模糊。
+        let prefetch = selected != nil ? Windows.neighborWindowsForPreviewPrefetch() : []
+        var newFullResWids = Set<CGWindowID>()
+        if let id = newPreviewedWid { newFullResWids.insert(id) }
+        for w in prefetch { if let wid = w.cgWindowId { newFullResWids.insert(wid) } }
+        if newPreviewedWid != previewedWid || newFullResWids != fullResWids {
             previewedWid = newPreviewedWid
-            // 被预览窗口变化时补一次全分辨率截图；完成后 refreshThumbnail→PreviewPanel.updateIfShowing 让预览变清晰。
-            // 不会回环：refreshThumbnail 只刷新显示、不触发截图，且本判断仅在 wid 变化时进入。
+            fullResWids = newFullResWids
+            // 选中窗口优先级最高（当前就在显示），相邻窗口随后预取。完成后 refreshThumbnail→PreviewPanel.updateIfShowing 让预览变清晰。
+            // 不会回环：refreshThumbnail 只刷新显示、不触发截图。重复请求由 captureThrottler 的 -fullRes 键限频去重。
             if let selected, let id = newPreviewedWid {
-                refreshAsync([selected], .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: [id])
+                refreshAsync([selected] + prefetch, .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: [id])
             }
         }
         if let selected, let id = selected.cgWindowId, let thumbnail = selected.thumbnail,
