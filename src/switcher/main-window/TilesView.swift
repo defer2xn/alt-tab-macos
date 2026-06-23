@@ -2,12 +2,6 @@ import Cocoa
 import Carbon.HIToolbox.Events
 import ShortcutRecorder
 
-enum SearchMode {
-    case off
-    case editing
-    case locked
-}
-
 enum SearchKeyResult {
     case handled
     case passToField
@@ -58,7 +52,7 @@ class TilesView {
     static func startSearchSession(_ startInSearchMode: Bool) {
         searchField.stringValue = ""
         Windows.updateSearchQuery("")
-        searchMode = startInSearchMode ? .editing : .off
+        searchMode = SearchModeResolver.startMode(startInSearch: startInSearchMode)
         updateSearchFieldEditability()
     }
 
@@ -71,17 +65,14 @@ class TilesView {
     }
 
     static func toggleSearchModeFromShortcut() {
-        if searchMode == .off {
-            enableSearchEditing()
-        } else if searchMode == .editing {
-            disableSearchMode()
-        } else {
-            enableSearchEditing()
+        switch SearchModeResolver.toggle(mode: searchMode) {
+            case .enterEditing: enableSearchEditing()
+            case .disable: disableSearchMode()
         }
     }
 
     static func disableSearchMode() {
-        guard searchMode != .off else { return }
+        guard SearchModeResolver.disable(mode: searchMode) == .exitToOff else { return }
         TilesPanel.shared.resetFrozenPosition()
         searchMode = .off
         updateSearchFieldEditability()
@@ -93,13 +84,15 @@ class TilesView {
     }
 
     static func lockSearchMode() {
-        if !ProFeature.lockSearchInSwitcher.attemptUse() { return }
-        if searchMode == .editing {
-            searchMode = .locked
-            updateSearchFieldEditability()
-            focusSelectedTileIfPossible()
-        } else if searchMode == .locked {
-            enableSearchEditing()
+        switch SearchModeResolver.lock(mode: searchMode, canLockSearch: ProFeature.lockSearchInSwitcher.attemptUse()) {
+            case .lockResults:
+                searchMode = .locked
+                updateSearchFieldEditability()
+                focusSelectedTileIfPossible()
+            case .unlockToEditing:
+                enableSearchEditing()
+            default:
+                return
         }
     }
 
@@ -115,20 +108,22 @@ class TilesView {
     }
 
     static func enableSearchEditing() {
-        if !ProFeature.searchInSwitcher.attemptUse() { return }
-        guard searchMode != .editing else {
-            placeSearchCaretAtEnd()
-            return
+        switch SearchModeResolver.enableEditing(mode: searchMode, canSearch: ProFeature.searchInSwitcher.attemptUse()) {
+            case .placeCaretOnly:
+                placeSearchCaretAtEnd()
+            case .enterEditing:
+                searchMode = .editing
+                updateSearchFieldEditability()
+                SwitcherSession.current?.forceDoNothingOnRelease = true
+                clearHover()
+                stopKeyRepeatTimers()
+                // 每次进编辑态都重排：展开搜索框 + 清掉列表高亮（从 .locked 进入时同样需要）
+                App.refreshUi(true)
+                TilesPanel.shared.makeFirstResponder(searchField)
+                placeSearchCaretAtEnd()
+            default:
+                return
         }
-        searchMode = .editing
-        updateSearchFieldEditability()
-        SwitcherSession.current?.forceDoNothingOnRelease = true
-        clearHover()
-        stopKeyRepeatTimers()
-        // 每次进编辑态都重排：展开搜索框 + 清掉列表高亮（从 .locked 进入时同样需要）
-        App.refreshUi(true)
-        TilesPanel.shared.makeFirstResponder(searchField)
-        placeSearchCaretAtEnd()
     }
 
     static func handleSearchEditingKeyDown(_ event: NSEvent) -> SearchKeyResult {
@@ -250,7 +245,7 @@ class TilesView {
     }
 
     private static func updateSearchFieldEditability() {
-        let editable = searchMode == .editing
+        let editable = SearchModeResolver.isFieldEditable(searchMode)
         searchField.isEditable = editable
         searchField.isSelectable = editable
         if SwitcherSession.isActive {
@@ -323,6 +318,7 @@ class TilesView {
     static func reset() {
         // it would be nicer to remove this whole "reset" logic, and instead update each component to check Appearance properties before showing
         // Maybe in some Appkit willDraw() function that triggers before drawing it
+        Tooltips.hideAll()
         NSScreen.updatePreferred()
         Appearance.update()
         // thumbnails are captured continuously. They will pick up the new size on the next cycle
@@ -883,11 +879,11 @@ class TilesDocumentView: FlippedView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         defer { resetDraggingState(false) }
-        guard let target = targetView(sender.draggingLocation) ?? dragTarget,
-              let window = target.window_,
-              let appUrl = window.application.bundleURL else { return false }
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL],
-              !urls.isEmpty else { return false }
+        let target = targetView(sender.draggingLocation) ?? dragTarget
+        let appUrl = target?.window_?.application.bundleURL
+        let urls = (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL]) ?? []
+        guard DragAndDropResolver.canDrop(hasTarget: target != nil, hasWindow: target?.window_ != nil, hasAppBundleURL: appUrl != nil, urlCount: urls.count),
+              let appUrl else { return false }
         let open = try? NSWorkspace.shared.open(urls, withApplicationAt: appUrl, options: [], configuration: [:])
         if open != nil { App.hideUi() }
         return open != nil
@@ -898,25 +894,27 @@ class TilesDocumentView: FlippedView {
     }
 
     private func dragOperation(_ location: NSPoint) -> NSDragOperation {
-        guard let target = targetView(location) else {
+        let target = targetView(location)
+        let pastDeadzone = target != nil && (window.map { CursorEvents.isAllowedToReactToPointerMovement($0.convertPoint(toScreen: location)) } ?? false)
+        let decision = DragAndDropResolver.dragOver(
+            hasTarget: target != nil,
+            pastDeadzone: pastDeadzone,
+            targetChanged: dragTarget !== target,
+            movedBeyondResetRadius: DragAndDropResolver.movedBeyondResetRadius(from: timerResetLocation, to: location, resetRadius: Self.dragAndDropTimerResetDistance))
+        switch decision {
+        case .noTarget:
             resetDraggingState(true)
             return []
-        }
-        if let window, CursorEvents.isAllowedToReactToPointerMovement(window.convertPoint(toScreen: location)) {
-            if dragTarget !== target {
+        case .inDeadzone:
+            return .link
+        case .track(let restartTimer):
+            if let target {
                 dragTarget = target
-                restartDraggingTimer(location)
-            } else if shouldRestartDraggingTimer(location) {
-                restartDraggingTimer(location)
+                if restartTimer { restartDraggingTimer(location) }
+                target.mouseMovedCallback()
             }
-            target.mouseMovedCallback()
+            return .link
         }
-        return .link
-    }
-
-    private func shouldRestartDraggingTimer(_ location: NSPoint) -> Bool {
-        guard let timerResetLocation else { return true }
-        return hypot(location.x - timerResetLocation.x, location.y - timerResetLocation.y) >= Self.dragAndDropTimerResetDistance
     }
 
     private func restartDraggingTimer(_ location: NSPoint) {

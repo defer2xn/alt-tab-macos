@@ -36,7 +36,7 @@ class App: AppCenterApplication {
     static var updaterController: SPUStandardUpdaterController?
     // don't queue multiple delayed rebuildUi() calls
     private static var delayedDisplayScheduled = 0
-    private static let refreshOpenUiThrottler = Throttler(delayInMs: 200)
+    private static let switcherUiRefreshThrottler = Throttler(delayInMs: 200)
 
     override init() {
         super.init()
@@ -69,12 +69,12 @@ class App: AppCenterApplication {
         ContextMenuEvents.toggle(false)
         CursorEvents.toggle(false)
         TrackpadEvents.reset()
+        Tooltips.hideAll()
         hideTilesPanelWithoutChangingKeyWindow()
         if !keepPreview {
             WindowThumbnails.previewedWid = nil
             PreviewPanel.shared.orderOut(nil)
         }
-        Tooltips.hideAll()
         MainMenu.toggle(true)
         ProTransitionManager.shared.onSwitcherDismissed()
     }
@@ -158,8 +158,11 @@ class App: AppCenterApplication {
         NSScreen.updatePreferred()
         App.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        // if the window was resized/repositioned by the user, restore the window the way it was
-        let restored = window.setFrameUsingName(window.frameAutosaveName)
+        // if the window was resized/repositioned by the user, restore the window the way it was.
+        // ObjCExceptionCatcher guards a corrupt persisted frame (non-finite / out of Int32 bounds):
+        // applying it throws NSInternalInconsistencyException and would abort the app (f481d5b0).
+        var restored = false
+        ObjCExceptionCatcher.catching { restored = window.setFrameUsingName(window.frameAutosaveName) }
         if !restored {
             NSScreen.preferred.repositionPanel(window)
             // Use the center function to continue to center, the `repositionPanel` function cannot center, it may be a system bug
@@ -301,7 +304,7 @@ class App: AppCenterApplication {
 
     static func refreshOpenUiAfterExternalEvent(_ windowsToScreenshot: [Window], windowRemoved: Bool = false) {
         WindowThumbnails.refreshAsync(windowsToScreenshot, .refreshUiAfterExternalEvent, windowRemoved: windowRemoved)
-        refreshOpenUiThrottler.throttleOrProceed {
+        switcherUiRefreshThrottler.throttleOrProceed {
             guard SwitcherSession.isActive else { return }
             if !Windows.updatesBeforeShowing() { hideUi(); return }
             refreshUi(true)
@@ -389,13 +392,10 @@ class App: AppCenterApplication {
 
     static func checkIfShortcutsShouldBeDisabled(_ activeWindow: Window?, _ activeApp: Application?) {
         let app = activeWindow?.application ?? activeApp!
-        let shortcutsShouldBeDisabled = Preferences.exceptions.contains { exception in
-            if let id = app.bundleIdentifier {
-                return !exception.bundleIdentifier.isEmpty && id.hasPrefix(exception.bundleIdentifier) &&
-                    (exception.ignore == .always || (exception.ignore == .whenFullscreen && (activeWindow?.isFullscreen ?? false)))
-            }
-            return false
-        }
+        let shortcutsShouldBeDisabled = ExceptionMatcher.disablesShortcuts(
+            app.state,
+            isFullscreen: activeWindow?.isFullscreen ?? false,
+            exceptions: Preferences.exceptions)
         KeyboardEvents.toggleGlobalShortcuts(shortcutsShouldBeDisabled)
         if shortcutsShouldBeDisabled && SwitcherSession.isActive {
             hideUi()
@@ -420,6 +420,8 @@ class App: AppCenterApplication {
         SystemAppearanceEvents.observe()
         SystemScrollerStyleEvents.observe()
         InputSourceEvents.observe()
+        ScreenLockEvents.observe()
+        SleepWakeEvents.observe()
         Applications.initialDiscovery()
         KeyboardEvents.addEventHandlers()
         CursorEvents.observe()
@@ -444,6 +446,7 @@ class App: AppCenterApplication {
         QAMenu.shared = QAMenu()
         QAMenu.shared?.orderFront(nil)
         if QAMenu.openSettingsOnLaunch { App.showSettingsWindow() }
+        if QAMenu.graphEnabled { DebugMenu.setEnabled(true) }
         #endif
         UsageStats.prune()
         ProTransitionManager.shared.onAction = { ProPromptHost.shared.dispatch($0) }

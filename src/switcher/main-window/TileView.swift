@@ -497,7 +497,7 @@ class TileView: FlippedView {
 
     private func searchSpanRanges() -> [NSRange] {
         var spanRanges = [NSRange]()
-        if Preferences.onlyShowApplications() || Preferences.showTitles == .appName {
+        if Preferences.showTitles == .appName {
             for result in window_?.swAppResults ?? [] {
                 spanRanges.append(NSRange(location: result.span.lowerBound, length: result.span.count))
             }
@@ -505,7 +505,8 @@ class TileView: FlippedView {
         }
         if Preferences.showTitles == .appNameAndWindowTitle || TileView.cachedEffectiveStyle == .titles {
             let appName = window_?.application.localizedName ?? ""
-            let offset = appName.isEmpty ? 0 : (appName + " - ").count
+            let windowTitle = window_?.title ?? ""
+            let offset = (appName.isEmpty || appName == windowTitle) ? 0 : (appName + " - ").count
             for result in window_?.swAppResults ?? [] {
                 spanRanges.append(NSRange(location: result.span.lowerBound, length: result.span.count))
             }
@@ -715,7 +716,7 @@ class TileView: FlippedView {
     private func getAppOrAndWindowTitle() -> String {
         let appName = window_?.application.localizedName
         let windowTitle = window_?.title
-        if Preferences.onlyShowApplications() || Preferences.showTitles == .appName {
+        if Preferences.showTitles == .appName {
             return appName ?? ""
         } else if Preferences.showTitles == .appNameAndWindowTitle || TileView.cachedEffectiveStyle == .titles {
             // titles 风格强制"应用名 - 窗口标题"，便于区分同一 app 的多窗口
@@ -816,14 +817,13 @@ class TileView: FlippedView {
     static func widthOfLongestVisibleTitle() -> CGFloat? {
         let labTitleView = TileTitleView(font: Appearance.font)
         let mode = Preferences.showTitles
-        let onlyApps = Preferences.onlyShowApplications()
         var maxWidth = CGFloat(0)
         for window in Windows.list {
             guard Windows.shouldDisplay(window) else { continue }
             let appName = window.application.localizedName ?? ""
-            let title = window.title ?? ""
+            let title = window.title
             let display: String
-            if onlyApps || mode == .appName {
+            if mode == .appName {
                 display = appName
             } else if mode == .appNameAndWindowTitle || TileView.cachedEffectiveStyle == .titles {
                 display = (!appName.isEmpty && !title.isEmpty && title != appName) ? (appName + " - " + title) : (appName.isEmpty ? title : appName)

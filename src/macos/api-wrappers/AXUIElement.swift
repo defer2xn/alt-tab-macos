@@ -24,8 +24,12 @@ extension AXUIElement {
     }
 
     @discardableResult
-    func subscribeToNotification(_ axObserver: AXObserver, _ notification: String, _ callback: (() -> Void)? = nil) throws -> Bool {
-        let result = AXObserverAddNotification(axObserver, self, notification as CFString, nil)
+    func subscribeToNotification(_ axObserver: AXObserver, _ notification: String, _ refcon: UnsafeMutableRawPointer? = nil) throws -> Bool {
+        // `refcon` is handed back verbatim to the AX callback for every delivery of this (element,
+        // notification) pair. We bake the owning (pid, wid) in here so the callback gets the identity
+        // for free — no `pid()` / `cgWindowId()` round-trip per event (and a reliable wid even for a
+        // window that's already been destroyed). See `AccessibilityEvents.subscriptionRefcon`.
+        let result = AXObserverAddNotification(axObserver, self, notification as CFString, refcon)
         if result == .success || result == .notificationAlreadyRegistered {
             return true
         }
@@ -76,6 +80,7 @@ extension AXUIElement {
             case kAXStatusLabelAttribute: result.statusLabel = castSafely(value)
             case kAXMinimizedAttribute: result.isMinimized = castSafely(value)
             case kAXFullscreenAttribute: result.isFullscreen = castSafely(value)
+            case kAXMainAttribute: result.isMain = castSafely(value)
             case kAXIsApplicationRunningAttribute: result.appIsRunning = castSafely(value)
             case kAXURLAttribute: result.url = castSafely(value)
             case kAXParentAttribute: result.parent = castSafely(value)
@@ -225,6 +230,7 @@ struct AXAttributes {
     var subrole: String?
     var isMinimized: Bool?
     var isFullscreen: Bool?
+    var isMain: Bool?
     var parent: AXUIElement?
     var children: [AXUIElement]?
     var focusedWindow: AXUIElement?

@@ -107,9 +107,9 @@ class WindowCaptureScreenshots {
         // 独立键仍对全分辨率截图自身限频 200ms，不会因此连发而冲击 OS 截图调用。
         let throttleKey = fullRes ? "capture-wid-\(scWindow.windowID)-fullRes" : "capture-wid-\(scWindow.windowID)"
         // [weak window] avoids keeping a closed Window alive while the capture is queued or in-flight with the OS
-        Applications.captureThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
-            guard !App.isTerminating, let window else { return }
-            let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false, request.fullRes)
+        Applications.screenshotThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
+            guard !App.isTerminating, !ScreenLockEvents.isScreenLocked, let window else { return }
+            let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false, fullRes)
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
             ActiveWindowCaptures.increment()
             SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { [weak window] sampleBuffer, error in
@@ -139,7 +139,7 @@ class WindowCaptureScreenshotsPrivateApi {
         for window in sorted {
             guard let wid = window.cgWindowId else { continue }
             let isPrioritized = prioritized.contains(wid)
-            Applications.captureThrottler.throttleOrProceed(key: "capture-wid-\(wid)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window] in
+            Applications.screenshotThrottler.throttleOrProceed(key: "capture-wid-\(wid)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window] in
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                 guard let wid = window?.cgWindowId, let cgImage = oneTimeCapture(wid) else { return }
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
@@ -152,7 +152,7 @@ class WindowCaptureScreenshotsPrivateApi {
     }
 
     private static func oneTimeCapture(_ wid: CGWindowID) -> CGImage? {
-        guard !App.isTerminating else { return nil }
+        guard !App.isTerminating, !ScreenLockEvents.isScreenLocked else { return nil }
         // we use CGSHWCaptureWindowList because it can screenshot minimized windows, which CGWindowListCreateImage can't
         var windowId_ = wid
         ActiveWindowCaptures.increment()

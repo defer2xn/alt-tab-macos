@@ -3,8 +3,6 @@ import Cocoa
 class Windows {
     static var list = [Window]()
     private(set) static var byWindowId = [CGWindowID: Window]()
-    // we use this to track if the focused window changed while alt-tab was open
-    private static var lastFocusedWindowTarget: String?
     private static var lastWindowActivityType = WindowActivityType.none
     private static var shouldSelectBestMatchOnSearchChange = false
     private static var shouldRestoreDefaultSelectionOnSearchClear = false
@@ -60,14 +58,6 @@ class Windows {
         }
     }
 
-    private static func compareByAppNameThenWindowTitle(_ w1: Window, _ w2: Window) -> ComparisonResult {
-        let order = w1.application.localizedName.localizedStandardCompare(w2.application.localizedName)
-        if order == .orderedSame {
-            return w1.title.localizedStandardCompare(w2.title)
-        }
-        return order
-    }
-
     static func voiceOverWindow(_ windowIndex: Int = (SwitcherSession.current?.selectedIndex ?? 0)) {
         // 仅 VoiceOver 开启时才需要把 tile 设为 firstResponder 供朗读；否则每次选中变化都白排一个
         // 10ms asyncAfter + makeFirstResponder（会走 AppKit key-view-loop，注释里也说拖慢 show）。
@@ -88,19 +78,17 @@ class Windows {
     static func updatesBeforeShowing() -> Bool {
         if MissionControl.state() == .showAllWindows || MissionControl.state() == .showFrontWindows { return false }
         if list.isEmpty { return true }
-        // TODO: find a way to update space info when spaces are changed, instead of on every trigger
-        // workaround: when Preferences > Mission Control > "Displays have separate Spaces" is unchecked,
-        // switching between displays doesn't trigger .activeSpaceDidChangeNotification; we get the latest manually
-        Spaces.refresh()
-        let windowToSpacesMap = shouldBatchSpaceUpdates() ? Spaces.buildWindowToSpacesMap() : nil
+        // Space/screen membership is refreshed OFF the hot path now (#5721): reactively on Space/screen
+        // change (SpacesEvents/ScreensEvents), and after show in `Applications.syncSpacesState`. Here we
+        // only read the cached values, so there is no blocking SkyLight IPC on the way to rendering. A
+        // one-frame staleness (e.g. a window just dragged to another Space) self-corrects via the deferred
+        // reconcile. `recomputeIsPhantom` is kept here: it's pure (no IPC) and reads the cached `spaceIds`.
         // Per-shortcut prefs and `exceptions` don't change for the duration of one show, but each
         // computed-property access rebuilds the underlying array via N×`CachedUserDefaults.macroPref`
         // calls. Snapshot them once and pass into the per-window helper.
         let filters = WindowFilters.snapshot()
-        // NSScreen.screens 在本同步循环内是不变量（不处理事件就不会刷新），逐窗口重取纯属浪费；提到循环外取一次。
-        let screens = NSScreen.screens
         for window in list {
-            window.updateSpacesAndScreen(windowToSpacesMap, screens)
+            window.recomputeIsPhantom()
             refreshIfWindowShouldBeShownToTheUser(window, filters)
         }
         refreshWhichWindowsToShowTheUser()
@@ -108,13 +96,8 @@ class Windows {
         return true
     }
 
-    private static func shouldBatchSpaceUpdates() -> Bool {
-        let trackedWindowCount = list.reduce(0) { $0 + ($1.cgWindowId == nil ? 0 : 1) }
-        return trackedWindowCount > Spaces.idsAndIndexes.count
-    }
-
     static func refreshWhichWindowsToShowTheUser() {
-        if Preferences.onlyShowApplications() {
+        if Preferences.onlyShowMainWindows() {
             // Group windows by application and select the optimal main window
             let windowsGroupedByApp = Dictionary(grouping: list) { $0.application.pid }
             windowsGroupedByApp.forEach { (app, windows) in
@@ -129,41 +112,26 @@ class Windows {
         }
     }
 
-    private static func shouldHideWindow(_ window: Window, _ entry: ExceptionEntry) -> Bool {
-        switch entry.hide {
-        case .none:
-            return false
-        case .always:
-            return true
-        case .whenNoOpenWindow:
-            return window.isWindowlessApp
-        case .windowTitleContains:
-            guard let patterns = entry.windowTitleContains, !patterns.isEmpty else {
-                return false
-            }
-            return patterns.contains { !$0.isEmpty && window.title.contains($0) }
-        }
-    }
-
     private static func refreshIfWindowShouldBeShownToTheUser(_ window: Window, _ f: WindowFilters) {
-        window.shouldShowTheUser =
-            !window.isInvisible &&
-            !(window.application.bundleIdentifier.flatMap { id in
-                f.exceptions.contains {
-                    !$0.bundleIdentifier.isEmpty && id.hasPrefix($0.bundleIdentifier) && shouldHideWindow(window, $0)
-                }
-            } ?? false) &&
-            !(f.appsToShow == .active && window.application.pid != Applications.frontmostPid) &&
-            !(f.appsToShow == .nonActive && window.application.pid == Applications.frontmostPid) &&
-            !(!(f.showHiddenWindows != .hide) && window.isHidden) &&
-            ((f.showWindowlessApps != .hide && window.isWindowlessApp) ||
-                !window.isWindowlessApp &&
-                !(!(f.showFullscreenWindows != .hide) && window.isFullscreen) &&
-                !(!(f.showMinimizedWindows != .hide) && window.isMinimized) &&
-                !(f.spacesToShow == .visible && !Spaces.visibleSpaces.contains { visibleSpace in window.spaceIds.contains { $0 == visibleSpace } }) &&
-                !(f.spacesToShow == .nonVisible && Spaces.visibleSpaces.contains { visibleSpace in window.spaceIds.contains { $0 == visibleSpace } }) &&
-                !(f.screensToShow == .showingAltTab && !window.isOnScreen(NSScreen.preferred)) &&
-                (f.groupTabs == .separateWindows || !window.isTabbed))
+        // `isOnPreferredScreen` is the one irreducibly OS-coupled fact (touches `Spaces.screenSpacesMap` +
+        // multi-screen quartz math); passed as `@autoclosure` so it's only evaluated if the cheaper
+        // filters above don't already exclude the window.
+        window.shouldShowTheUser = WindowFilterResolver.shouldShow(
+            window.state, window.application.state,
+            onlyFrontmostApp: f.appsToShow == .active,
+            excludeFrontmostApp: f.appsToShow == .nonActive,
+            hideHidden: f.showHiddenWindows == .hide,
+            hideWindowless: f.showWindowlessApps == .hide,
+            hideFullscreen: f.showFullscreenWindows == .hide,
+            hideMinimized: f.showMinimizedWindows == .hide,
+            onlyVisibleSpaces: f.spacesToShow == .visible,
+            onlyNonVisibleSpaces: f.spacesToShow == .nonVisible,
+            onlyPreferredScreen: f.screensToShow == .showingAltTab,
+            separateTabs: f.groupTabs == .separateWindows,
+            frontmostPid: Applications.frontmostPid,
+            visibleSpaceIds: Spaces.visibleSpaces,
+            exceptions: f.exceptions,
+            isOnPreferredScreen: window.isOnScreen(NSScreen.preferred))
     }
 
     /// Selects the most appropriate main window from a given list of windows.
@@ -182,10 +150,11 @@ class Windows {
             } else if window2.application.focusedWindow?.cgWindowId == window2.cgWindowId {
                 return false
             }
-            // Prefer the main window
-            if window1.isAppMainWindow() && !window2.isAppMainWindow() {
+            // Prefer the main window (cached AXMain flag — refreshed off-main with the window's other
+            // attributes; avoids AX IPC in this comparator on the show path, see #5721 audit)
+            if window1.isMainWindow && !window2.isMainWindow {
                 return true
-            } else if !window1.isAppMainWindow() && window2.isAppMainWindow() {
+            } else if !window1.isMainWindow && window2.isMainWindow {
                 return false
             }
             return true
@@ -204,6 +173,76 @@ class Windows {
 
     static func setInitialSelectedAndHoveredWindowIndex() {
         guard let session = SwitcherSession.current else { return }
+        // titles 命令面板风格：默认选中第一行（当前窗口）；其它风格保持原有"选中上一个窗口"的快速切换语义。
+        // 取首个「可显示」窗口，避免 list[0] 被过滤（如 appsToShow=.nonActive 隐藏最前窗口）时静默 no-op、整列无选中。
+        if Preferences.effectiveAppearanceStyle(session.shortcutIndex) == .titles {
+            resetForInitialPick(session)
+            updateSelectedAndHoveredWindowIndex(list.firstIndex(where: { shouldDisplay($0) }) ?? 0)
+            return
+        }
+        let snapshot = selectionSnapshot()
+        let inputs = makeSelectionInputs(snapshot, session: session)
+        let pickIndex = SelectionResolver.initialPickIndex(inputs)
+        resetForInitialPick(session)
+        if let idx = pickIndex {
+            updateSelectedAndHoveredWindowIndex(idx)
+        }
+    }
+
+    static func updateSelectedWindow() {
+        guard let session = SwitcherSession.current else { return }
+        let snapshot = selectionSnapshot()
+        let inputs = makeSelectionInputs(snapshot, session: session)
+        let decision = SelectionResolver.decide(inputs)
+        shouldRestoreDefaultSelectionOnSearchClear = false
+        shouldSelectBestMatchOnSearchChange = false
+        applySelectionDecision(decision, session: session)
+    }
+
+    /// Project `list` into the kernel's window view (just the fields selection needs).
+    private static func selectionSnapshot() -> [SelectionWindow] {
+        list.map {
+            SelectionWindow(id: $0.id,
+                            visible: shouldDisplay($0),
+                            lastFocusOrder: $0.lastFocusOrder,
+                            isMinimized: $0.isMinimized,
+                            isWindowlessApp: $0.isWindowlessApp)
+        }
+    }
+
+    private static func makeSelectionInputs(_ snapshot: [SelectionWindow], session: SwitcherSession) -> SelectionInputs {
+        SelectionInputs(
+            list: snapshot,
+            selectedIndex: session.selectedIndex,
+            selectedTarget: session.selectedTarget,
+            useLastFocusedRule: Applications.frontmostPid != nil
+                && Preferences.windowOrder[session.shortcutIndex] != .recentlyFocused,
+            restoreDefaultOnSearchClear: shouldRestoreDefaultSelectionOnSearchClear,
+            bestMatchOnSearchChange: shouldSelectBestMatchOnSearchChange)
+    }
+
+    private static func applySelectionDecision(_ decision: SelectionDecision, session: SwitcherSession) {
+        switch decision {
+        case .clearTargetAndHover:
+            session.selectedTarget = nil
+            session.hoveredIndex = nil
+        case .resetThenSelect(let idx):
+            resetForInitialPick(session)
+            updateSelectedAndHoveredWindowIndex(idx)
+        case .resetWithoutSelection:
+            resetForInitialPick(session)
+        case .selectAt(let idx):
+            updateSelectedAndHoveredWindowIndex(idx)
+        case .ensureTargetSet(let idx):
+            if session.selectedTarget == nil && idx < list.count {
+                session.selectedTarget = list[idx].id
+            }
+        }
+    }
+
+    /// Wrapper-side reset that mirrors the first half of the old `setInitialSelectedAndHoveredWindowIndex`:
+    /// clear `selectedTarget`, reset `selectedIndex` to 0, redraw the old highlight, drop hover.
+    private static func resetForInitialPick(_ session: SwitcherSession) {
         let oldIndex = session.selectedIndex
         session.selectedIndex = 0
         session.selectedTarget = nil
@@ -211,102 +250,6 @@ class Windows {
         if let oldHovered = session.hoveredIndex {
             session.hoveredIndex = nil
             TilesView.highlight(oldHovered)
-        }
-        // titles 命令面板风格：默认选中第一行（当前窗口）；其它风格保持原有"选中上一个窗口"的快速切换语义
-        // 取首个「可显示」窗口，避免 list[0] 被过滤（如 appsToShow=.nonActive 隐藏最前窗口）时
-        // updateSelectedAndHoveredWindowIndex(0) 因 shouldDisplay 失败而静默 no-op、整列无选中
-        if Preferences.effectiveAppearanceStyle(session.shortcutIndex) == .titles {
-            updateSelectedAndHoveredWindowIndex(visibleWindowIndexes().first ?? 0)
-            return
-        }
-        if Applications.frontmostPid != nil,
-           Preferences.windowOrder[session.shortcutIndex] != .recentlyFocused,
-           let lastFocusedOrderWindowIndex = getLastFocusedOrderWindowIndex() {
-            updateSelectedAndHoveredWindowIndex(lastFocusedOrderWindowIndex)
-        } else {
-            // edge-case: when the 2 most recently focused windows are both minimized, select the first
-            if list.count >= 2 && list[0].isMinimized && list[1].isMinimized {
-                updateSelectedAndHoveredWindowIndex(0)
-            } else {
-                cycleSelectedWindowIndex(1)
-                if session.selectedIndex == 0 {
-                    updateSelectedAndHoveredWindowIndex(0)
-                }
-            }
-        }
-    }
-
-    static func updateSelectedWindow() {
-        guard let session = SwitcherSession.current else { return }
-        let focusedWindowTarget = currentFocusedWindowTarget()
-        defer { lastFocusedWindowTarget = focusedWindowTarget }
-        if shouldRestoreDefaultSelectionOnSearchClear {
-            shouldRestoreDefaultSelectionOnSearchClear = false
-            setInitialSelectedAndHoveredWindowIndex()
-            return
-        }
-        let visibleIndexes = visibleWindowIndexes()
-        guard let firstVisibleIndex = visibleIndexes.first else {
-            session.selectedTarget = nil
-            session.hoveredIndex = nil
-            return
-        }
-        if shouldSelectBestMatchOnSearchChange {
-            shouldSelectBestMatchOnSearchChange = false
-            updateSelectedAndHoveredWindowIndex(firstVisibleIndex)
-            return
-        }
-        if shouldSelectFromScratch(focusedWindowTarget) {
-            setInitialSelectedAndHoveredWindowIndex()
-            return
-        }
-        if restoreSelectionTargetIfVisible() { return }
-        adaptSelectionToVisibleIndexes(visibleIndexes, firstVisibleIndex)
-    }
-
-    private static func visibleWindowIndexes() -> [Int] {
-        list.indices.filter { shouldDisplay(list[$0]) }
-    }
-
-    private static func currentFocusedWindowTarget() -> String? {
-        getLastFocusedOrderWindowIndex().map { list[$0].id }
-    }
-
-    private static func shouldSelectFromScratch(_ focusedWindowTarget: String?) -> Bool {
-        SwitcherSession.current?.selectedTarget == nil || focusedWindowChangedWhileShowing(focusedWindowTarget)
-    }
-
-    private static func focusedWindowChangedWhileShowing(_ focusedWindowTarget: String?) -> Bool {
-        guard let session = SwitcherSession.current, Search.normalizedQuery(session.searchQuery).isEmpty else { return false }
-        guard let lastFocusedWindowTarget, let focusedWindowTarget else { return false }
-        return focusedWindowTarget != lastFocusedWindowTarget
-    }
-
-    private static func restoreSelectionTargetIfVisible() -> Bool {
-        guard let session = SwitcherSession.current, let target = session.selectedTarget else { return false }
-        guard let index = list.firstIndex(where: { $0.id == target && shouldDisplay($0) }) else { return false }
-        if index == session.selectedIndex { return true }
-        updateSelectedAndHoveredWindowIndex(index)
-        return true
-    }
-
-    private static func adaptSelectionToVisibleIndexes(_ visibleIndexes: [Int], _ firstVisibleIndex: Int) {
-        guard let session = SwitcherSession.current, let lastVisibleIndex = visibleIndexes.last else { return }
-        if !visibleIndexes.contains(session.selectedIndex) {
-            let closest = visibleIndexes.last(where: { $0 < session.selectedIndex }) ?? lastVisibleIndex
-            updateSelectedAndHoveredWindowIndex(closest)
-            return
-        }
-        if session.selectedIndex > lastVisibleIndex {
-            updateSelectedAndHoveredWindowIndex(lastVisibleIndex)
-            return
-        }
-        if session.selectedIndex < firstVisibleIndex {
-            updateSelectedAndHoveredWindowIndex(firstVisibleIndex)
-            return
-        }
-        if session.selectedTarget == nil {
-            session.selectedTarget = list[session.selectedIndex].id
         }
     }
 
@@ -408,22 +351,26 @@ class Windows {
     /// lastFocusOrder methods
     //////////////////////////////
 
-    /// Updates windows "lastFocusOrder" to ensure unique values based on window z-order.
-    /// Windows are ordered by their position in Spaces.windowsInSpaces() results,
-    /// with topmost windows first.
+    /// Seeds "lastFocusOrder" from window z-order (top-most first) on the first summon, so the initial MRU
+    /// order reflects screen stacking before any focus events arrive. The z-order query is a blocking CGS
+    /// call, so it runs off-main via CGSCallScheduler (#5721); the list reseed + a refresh land on main when
+    /// it returns. (First-summon-only, so the seed lands a frame after that first show — acceptable.)
     static func sortByLevel() {
-        var windowLevelMap = [CGWindowID?: Int]()
-        for (index, cgWindowId) in Spaces.windowsInSpaces(Spaces.visibleSpaces).enumerated() {
-            windowLevelMap[cgWindowId] = index
-        }
-        list = list
-        .sorted { w1, w2 in
-            (windowLevelMap[w1.cgWindowId] ?? .max) < (windowLevelMap[w2.cgWindowId] ?? .max)
-        }
-        .enumerated()
-        .map { (index, window) -> Window in
-            window.lastFocusOrder = index
-            return window
+        CGSCallScheduler.windowsInSpaces(Spaces.visibleSpaces) { wids in
+            var windowLevelMap = [CGWindowID?: Int]()
+            for (index, cgWindowId) in wids.enumerated() {
+                windowLevelMap[cgWindowId] = index
+            }
+            list = list
+            .sorted { w1, w2 in
+                (windowLevelMap[w1.cgWindowId] ?? .max) < (windowLevelMap[w2.cgWindowId] ?? .max)
+            }
+            .enumerated()
+            .map { (index, window) -> Window in
+                window.lastFocusOrder = index
+                return window
+            }
+            if SwitcherSession.isActive { App.refreshOpenUiAfterExternalEvent(Windows.list) }
         }
     }
 
@@ -434,59 +381,40 @@ class Windows {
         let rawQuery = SwitcherSession.current?.searchQuery ?? ""
         let trimmedQuery = Search.normalizedQuery(rawQuery)
         let shortcutIndex = (SwitcherSession.current?.shortcutIndex ?? 0)
-        let showWindowlessApps = Preferences.showWindowlessApps(shortcutIndex)
-        let showHiddenWindows = Preferences.showHiddenWindows(shortcutIndex)
-        let showMinimizedWindows = Preferences.showMinimizedWindows(shortcutIndex)
-        let sortType = Preferences.windowOrder(shortcutIndex)
+        // Hoisted once per sort: locals are captured by the comparator closure so each of the
+        // O(n log n) comparisons reads them directly.
+        let searchActive = !trimmedQuery.isEmpty
+        let windowlessAtEnd = Preferences.showWindowlessApps(shortcutIndex) == .showAtTheEnd
+        let hiddenAtEnd = Preferences.showHiddenWindows(shortcutIndex) == .showAtTheEnd
+        let minimizedAtEnd = Preferences.showMinimizedWindows(shortcutIndex) == .showAtTheEnd
+        let sortType = orderSortType(Preferences.windowOrder(shortcutIndex))
+        // Precompute each window's ordering facts once (O(n) Search calls), then sort on the snapshots.
+        let facts = Dictionary(uniqueKeysWithValues: list.map { (ObjectIdentifier($0), orderWindow($0, rawQuery)) })
         list.sort {
-            if !trimmedQuery.isEmpty {
-                let matches0 = Search.matches($0, query: rawQuery)
-                let matches1 = Search.matches($1, query: rawQuery)
-                if matches0 != matches1 { return matches0 }
-                let score0 = Search.relevance(for: $0, query: rawQuery)
-                let score1 = Search.relevance(for: $1, query: rawQuery)
-                if score0 != score1 { return score0 > score1 }
-                return $0.lastFocusOrder < $1.lastFocusOrder
-            }
-            // separate buckets for these types of windows
-            if showWindowlessApps == .showAtTheEnd && $0.isWindowlessApp != $1.isWindowlessApp {
-                return $1.isWindowlessApp
-            }
-            if showHiddenWindows == .showAtTheEnd && $0.isHidden != $1.isHidden {
-                return $1.isHidden
-            }
-            if showMinimizedWindows == .showAtTheEnd && $0.isMinimized != $1.isMinimized {
-                return $1.isMinimized
-            }
-            // sort within each buckets
-            if sortType == .recentlyFocused {
-                return $0.lastFocusOrder < $1.lastFocusOrder
-            }
-            if sortType == .recentlyCreated {
-                return $1.creationOrder < $0.creationOrder
-            }
-            var order = ComparisonResult.orderedSame
-            if sortType == .alphabetical {
-                order = compareByAppNameThenWindowTitle($0, $1)
-            }
-            if sortType == .space {
-                if $0.isOnAllSpaces && $1.isOnAllSpaces {
-                    order = .orderedSame
-                } else if $0.isOnAllSpaces {
-                    order = .orderedAscending
-                } else if $1.isOnAllSpaces {
-                    order = .orderedDescending
-                } else if let spaceIndex0 = $0.spaceIndexes.first, let spaceIndex1 = $1.spaceIndexes.first {
-                    order = spaceIndex0.compare(spaceIndex1)
-                }
-                if order == .orderedSame {
-                    order = compareByAppNameThenWindowTitle($0, $1)
-                }
-            }
-            if order == .orderedSame {
-                order = $0.lastFocusOrder.compare($1.lastFocusOrder)
-            }
-            return order == .orderedAscending
+            WindowOrderResolver.isOrderedBefore(
+                facts[ObjectIdentifier($0)]!, facts[ObjectIdentifier($1)]!,
+                searchActive: searchActive,
+                windowlessAtEnd: windowlessAtEnd,
+                hiddenAtEnd: hiddenAtEnd,
+                minimizedAtEnd: minimizedAtEnd,
+                sortType: sortType)
+        }
+    }
+
+    private static func orderWindow(_ window: Window, _ query: String) -> OrderWindow {
+        OrderWindow(
+            state: window.state,
+            app: window.application.state,
+            searchMatches: query.isEmpty ? false : Search.matches(window, query: query),
+            searchRelevance: query.isEmpty ? 0 : Search.relevance(for: window, query: query))
+    }
+
+    private static func orderSortType(_ p: WindowOrderPreference) -> OrderSortType {
+        switch p {
+            case .recentlyFocused: return .recentlyFocused
+            case .recentlyCreated: return .recentlyCreated
+            case .alphabetical: return .alphabetical
+            case .space: return .space
         }
     }
 
@@ -591,9 +519,13 @@ class Windows {
         for w in windows {
             if let wid = w.cgWindowId {
                 AXCallScheduler.shared.removeEntries(withPrefix: "wid-\(wid)-")
-                Applications.windowListUpdateThrottler.removeEntries(withPrefix: "\(wid)-")
-                Applications.captureThrottler.removeEntry(withKey: "capture-wid-\(wid)")
-                Applications.captureThrottler.removeEntry(withKey: "capture-wid-\(wid)-fullRes")
+                // one-shot subscription keys (see Window.observeEvents) use the `sub-win-` prefix, so the
+                // `wid-` cleanup above misses them; strip them here too or they leak 6 entries per window.
+                AXCallScheduler.shared.removeEntry(key: "sub-win-\(wid)")
+                AXCallScheduler.shared.removeEntries(withPrefix: "sub-win-\(wid)-")
+                Applications.windowAttributesThrottler.removeEntries(withPrefix: "\(wid)-")
+                Applications.screenshotThrottler.removeEntry(withKey: "capture-wid-\(wid)")
+                Applications.screenshotThrottler.removeEntry(withKey: "capture-wid-\(wid)-fullRes")
             }
             // Detach the per-window AX observer's runloop source. Without this the AX events
             // thread's runloop accumulates one orphaned source per window-ever-opened (leak #1,
@@ -607,7 +539,6 @@ class Windows {
         if addWindowlessWindowIfNeeded {
             windows.forEach { $0.application.addWindowlessWindowIfNeeded() }
         }
-        lastFocusedWindowTarget = getLastFocusedOrderWindowIndex().map { list[$0].id }
         App.refreshOpenUiAfterExternalEvent([], windowRemoved: true)
     }
 }

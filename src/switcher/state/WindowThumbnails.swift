@@ -13,7 +13,7 @@ enum WindowThumbnails {
     static func previewSelectedIfNeeded() {
         let selected: Window?
         if let session = SwitcherSession.current, ScreenRecordingPermission.status == .granted,
-           Preferences.effectivePreviewSelectedWindow(session.shortcutIndex), !Preferences.onlyShowApplications(session.shortcutIndex),
+           Preferences.effectivePreviewSelectedWindow(session.shortcutIndex),
            TilesPanel.shared.isKeyWindow {
             selected = Windows.selectedWindow()
         } else {
@@ -30,7 +30,7 @@ enum WindowThumbnails {
             previewedWid = newPreviewedWid
             fullResWids = newFullResWids
             // 选中窗口优先级最高（当前就在显示），相邻窗口随后预取。完成后 refreshThumbnail→PreviewPanel.updateIfShowing 让预览变清晰。
-            // 不会回环：refreshThumbnail 只刷新显示、不触发截图。重复请求由 captureThrottler 的 -fullRes 键限频去重。
+            // 不会回环：refreshThumbnail 只刷新显示、不触发截图。重复请求由 screenshotThrottler 的 -fullRes 键限频去重。
             if let selected, let id = newPreviewedWid {
                 refreshAsync([selected] + prefetch, .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: [id])
             }
@@ -47,7 +47,7 @@ enum WindowThumbnails {
     static func refreshAsync(_ windows: [Window], _ source: RefreshCausedBy, windowRemoved: Bool = false, prioritizedIds: Set<CGWindowID>? = nil) {
         let shortcutIndex = SwitcherSession.activeShortcutIndex
         guard (!windows.isEmpty || windowRemoved) && ScreenRecordingPermission.status == .granted
-               && !Preferences.onlyShowApplications(shortcutIndex)
+               && !ScreenLockEvents.isScreenLocked
                && (!Appearance.hideThumbnails || Preferences.effectivePreviewSelectedWindow(shortcutIndex))
                && (Preferences.captureWindowsInBackground || SwitcherSession.isActive) else { return }
         var eligibleWindows = [Window]()

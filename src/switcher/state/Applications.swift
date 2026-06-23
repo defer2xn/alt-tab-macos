@@ -6,15 +6,16 @@ class Applications {
     // O(1) pid lookup for findOrCreate; mirrors `list` 1:1, maintained at every list mutation
     private(set) static var byPid = [pid_t: Application]()
     static var frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    // Layer 0: global throttle on manuallyRefreshAllWindows (panel show full-sync)
-    static let manualRefreshThrottler = Throttler(delayInMs: 1000)
-    // Layer 1 (AX IPC throttle + retry + concurrency) is handled by AXCallScheduler.shared
-    // Layer 2: throttle mutations to Applications.list / Windows.list on main thread
-    static let appListUpdateThrottler = ThrottlerWithKey(delayInMs: 200)
-    static let windowListUpdateThrottler = ThrottlerWithKey(delayInMs: 200)
-    static let badgesThrottler = Throttler(delayInMs: 1000)
-    // Layer 3: throttle per-WID screenshot captures (gates SCScreenshotManager / CGSHWCaptureWindowList)
-    static let captureThrottler = ThrottlerWithKey(delayInMs: 200)
+    // Throttlers coalesce redundant work. They are SEPARATE from AXCallScheduler, which is a pure executor
+    // (bounded pools + retry, no throttle). Each one below states what it coalesces and why:
+    // A — suppress redundant inbound events: coalesce resize/move/title bursts to ≤1 attribute read per window
+    static let windowAttributesThrottler = ThrottlerWithKey(delayInMs: 200)
+    // B — suppress redundant recompute: ≤1 full window-inventory scan per second (on switcher show)
+    static let fullRescanThrottler = Throttler(delayInMs: 1000)
+    // B — ≤1 Dock-badge fetch per second
+    static let dockBadgeThrottler = Throttler(delayInMs: 1000)
+    // C — cap a resource: ≤1 thumbnail capture per window per 200ms
+    static let screenshotThrottler = ThrottlerWithKey(delayInMs: 200)
 
     static func initialDiscovery() {
         addInitialRunningApplications()
@@ -26,11 +27,62 @@ class Applications {
     }
 
     static func manuallyRefreshAllWindows() {
-        manualRefreshThrottler.throttleOrProceed {
+        fullRescanThrottler.throttleOrProceed {
+            syncSpacesState()
+            addMissingApps()
             removeZombieWindows()
             addMissingWindows()
             reviewExistingWindows()
-            refreshIsInvisible()
+            refreshIsPhantom()
+        }
+    }
+
+    /// Refresh Space topology + per-window Space/screen membership via SkyLight, OFF the main thread, then
+    /// reconcile the open switcher only if something moved. This is the per-summon Space refresh that used
+    /// to block `Windows.updatesBeforeShowing` (#5721) — relocated here (runs ~0.25s after show, throttled),
+    /// and first so its correction lands before the best-effort window passes. Mirrors `refreshIsPhantom`'s
+    /// capture-on-main → query-off-main → apply-on-main pattern.
+    static func syncSpacesState() {
+        let mainScreenUuid = Spaces.mainScreenUuid()
+        AXCallScheduler.shared.submit(scan: true) {
+            let snapshot = Spaces.query(mainScreenUuid, includeWindowMap: true)
+            DispatchQueue.main.async {
+                var changed = Spaces.applyTopology(snapshot)
+                for window in Windows.list {
+                    if window.applySpacesAndScreen(snapshot.windowToSpacesMap) { changed = true }
+                }
+                if changed && SwitcherSession.isActive {
+                    App.refreshOpenUiAfterExternalEvent([])
+                }
+            }
+        }
+    }
+
+    /// we may not be tracking an app at all: we failed to subscribe to it, or it never entered our list.
+    /// that is fine as long as it has no window; but once it owns an on-screen window, we can trace that
+    /// window back to its owner pid and backfill the app. this is the non-AX twin of the
+    /// `handleEventWindow` → `findOrCreate` backfill, which only fires for apps we already subscribe to.
+    /// note: `CGWindowList` is current-Space-only (#1324), so this complements (does not replace) the
+    /// brute-force remote-token discovery that finds other-Space windows.
+    static func addMissingApps() {
+        let knownPids = Set(list.map { $0.pid })
+        // CGWindowListCopyWindowInfo is a synchronous WindowServer IPC call; run it off the main thread
+        AXCallScheduler.shared.submit {
+            let untrackedPids = Set(CGWindow.windows(.optionOnScreenOnly).compactMap { window -> pid_t? in
+                // most-selective check first: nearly every on-screen window belongs to an already-tracked app,
+                // so the knownPids lookup short-circuits before we test layer (layer 0 == normal windows;
+                // skips menubar/UI/floating chrome, see CGWindow.isNotMenubarOrOthers)
+                guard let pid = window.ownerPID(), !knownPids.contains(pid), window.layer() == 0 else { return nil }
+                return pid
+            })
+            guard !untrackedPids.isEmpty else { return }
+            DispatchQueue.main.async {
+                for pid in untrackedPids {
+                    guard let app = findOrCreate(pid, false) else { continue }
+                    Logger.info { "addMissingApps found untracked app with window:\(app.debugId)" }
+                    manuallyUpdateWindows(app)
+                }
+            }
         }
     }
 
@@ -46,7 +98,7 @@ class Applications {
     }
 
     static func manuallyUpdateWindows(_ app: Application) {
-        AXCallScheduler.shared.schedule(key: "pid-\(app.pid)", context: app.debugId, pid: app.pid) { [weak app] in
+        AXCallScheduler.shared.schedule(key: "pid-\(app.pid)", context: app.debugId, pid: app.pid, scan: true) { [weak app] in
             guard let app, let axUiElement = app.axUiElement else { return }
             let axWindows = try axUiElement.allWindows(app.pid)
             guard !axWindows.isEmpty else {
@@ -70,19 +122,20 @@ class Applications {
     /// Unified window attribute fetch + main-thread update. Used by both manual sync and reviewExistingWindows.
     /// Uses the "generic" bucket so a real focus event (which lives in the "focus" bucket) is never clobbered.
     static func updateWindowAttributes(_ axWindow: AXUIElement, _ wid: CGWindowID, _ app: Application) {
-        AXCallScheduler.shared.schedule(key: "wid-\(wid)-generic", context: app.debugId, pid: app.pid) { [weak app] in
+        AXCallScheduler.shared.schedule(key: "wid-\(wid)-generic", context: app.debugId, pid: app.pid, scan: true) { [weak app] in
             guard let app else { return }
             guard wid != 0 && wid != TilesPanel.shared.windowNumber else { return }
             let level = wid.level()
             let isSelf = app.pid == ProcessInfo.processInfo.processIdentifier
-            let keys = [kAXTitleAttribute, kAXSubroleAttribute, kAXRoleAttribute, kAXSizeAttribute, kAXPositionAttribute, kAXFullscreenAttribute, kAXMinimizedAttribute] + (isSelf ? [] : [kAXChildrenAttribute])
+            let keys = [kAXTitleAttribute, kAXSubroleAttribute, kAXRoleAttribute, kAXSizeAttribute, kAXPositionAttribute, kAXFullscreenAttribute, kAXMinimizedAttribute, kAXMainAttribute] + (isSelf ? [] : [kAXChildrenAttribute])
             let a = try axWindow.attributes(keys)
             let tabSiblingTitles = isSelf ? nil : TabGroup.extractTabTitles(a.children)
             DispatchQueue.main.async { [weak app] in
                 guard let app else { return }
-                windowListUpdateThrottler.throttleOrProceed(key: "\(wid)-generic") {
+                windowAttributesThrottler.throttleOrProceed(key: "\(wid)-generic") {
                     let findOrCreate = Windows.findOrCreate(axWindow, wid, app, level, a.title, a.subrole, a.role, a.size, a.position, a.isFullscreen, a.isMinimized)
                     guard let window = findOrCreate.0 else { return }
+                    window.isMainWindow = a.isMain ?? false
                     var tabStateChanged = false
                     if tabSiblingTitles != nil || window.tabbedSiblingWids != nil {
                         tabStateChanged = TabGroup.updateState(window, tabSiblingTitles)
@@ -114,34 +167,24 @@ class Applications {
         // snapshot wids on main thread where Windows.list is safe to read
         let wIds = Windows.list.compactMap { $0.cgWindowId }
         guard !wIds.isEmpty else { return }
-        // CGWindowListCreateDescriptionFromArray is a synchronous WindowServer IPC call; run it off main thread
-        AXCallScheduler.shared.submit {
-            let rawIds: CFArray = wIds.map { UnsafeRawPointer(bitPattern: UInt($0)) }.withUnsafeBufferPointer {
-                CFArrayCreate(nil, UnsafeMutablePointer(mutating: $0.baseAddress), $0.count, nil)
-            }
-            let descriptions = CGWindowListCreateDescriptionFromArray(rawIds) as? [[CFString: Any]]
-            let existingWids = descriptions?.compactMap { $0[kCGWindowNumber] } as? [CGWindowID]
-            guard let existingWids else { return }
-            let believedAlive = Set(wIds)
-            let confirmedAlive = Set(existingWids)
-            let zombies = believedAlive.subtracting(confirmedAlive)
+        CGSCallScheduler.existingWindowIds(among: wIds) { alive in
+            guard let alive else { return } // query failed; don't garbage-collect on incomplete data
+            let zombies = Set(wIds).subtracting(alive)
             guard !zombies.isEmpty else { return }
-            DispatchQueue.main.async {
-                for window in Windows.list.reversed() {
-                    if let wid = window.cgWindowId, zombies.contains(wid) {
-                        Logger.debug { window.debugId }
-                        Windows.removeWindows([window], true)
-                    }
+            for window in Windows.list.reversed() {
+                if let wid = window.cgWindowId, zombies.contains(wid) {
+                    Logger.debug { window.debugId }
+                    Windows.removeWindows([window], true)
                 }
             }
         }
     }
 
-    /// detect "ghost" windows: windows that the OS has tagged invisible (alpha=0, orderOut:, etc.)
+    /// detect "phantom" windows: windows that the OS has tagged invisible (alpha=0, orderOut:, etc.)
     /// but that AX still hands us as live windows. Disambiguates against the other reasons a
     /// window can be in the CGS-invisible bucket (tabs, minimized, hidden app, other-Space).
-    /// see src/experimentations/GhostWindowDetection.swift
-    static func refreshIsInvisible() {
+    /// see src/experimentations/PhantomWindowDetection.swift
+    static func refreshIsPhantom() {
         let widsAndWindows: [(CGWindowID, Window)] = Windows.list.compactMap { w in
             guard let wid = w.cgWindowId, wid != CGWindowID(bitPattern: -1) else { return nil }
             return (wid, w)
@@ -149,15 +192,18 @@ class Applications {
         guard !widsAndWindows.isEmpty else { return }
         let spaceIds = Spaces.idsAndIndexes.map { $0.0 }
         AXCallScheduler.shared.submit {
-            let visibleCgsWindowIds = Set(Spaces.windowsInSpaces(spaceIds, false))
-            let allCgsWindowIds = Set(Spaces.windowsInSpaces(spaceIds, true))
+            let visibleCgsWindowIds = Set(CGSCallScheduler.windowsInSpaces(spaceIds, false))
+            let allCgsWindowIds = Set(CGSCallScheduler.windowsInSpaces(spaceIds, true))
             DispatchQueue.main.async {
                 var changed = [Window]()
                 for (wid, window) in widsAndWindows {
-                    let newValue = computeIsInvisible(window, wid, visibleCgsWindowIds, allCgsWindowIds)
-                    if window.isInvisible != newValue {
-                        Logger.debug { "GhostDetect flip \(window.debugId) wid=\(wid) isInvisible=\(newValue) (inVisible=\(visibleCgsWindowIds.contains(wid)) inAll=\(allCgsWindowIds.contains(wid)) isMinimized=\(window.isMinimized) isHidden=\(window.isHidden) isTabbed=\(window.isTabbed) spaceIds=\(window.spaceIds))" }
-                        window.isInvisible = newValue
+                    let newValue = PhantomWindowDetector.cgsVerdict(window.state, window.application.state,
+                        inVisibleList: visibleCgsWindowIds.contains(wid),
+                        inAllList: allCgsWindowIds.contains(wid),
+                        visibleSpaceIds: Spaces.visibleSpaces)
+                    if window.isPhantom != newValue {
+                        Logger.debug { "PhantomDetect flip \(window.debugId) wid=\(wid) isPhantom=\(newValue) (inVisible=\(visibleCgsWindowIds.contains(wid)) inAll=\(allCgsWindowIds.contains(wid)) isMinimized=\(window.isMinimized) isHidden=\(window.isHidden) isTabbed=\(window.isTabbed) spaceIds=\(window.spaceIds))" }
+                        window.isPhantom = newValue
                         changed.append(window)
                     }
                 }
@@ -168,29 +214,29 @@ class Applications {
         }
     }
 
-    private static func computeIsInvisible(_ w: Window, _ wid: CGWindowID, _ visibleCgsWindowIds: Set<CGWindowID>, _ allCgsWindowIds: Set<CGWindowID>) -> Bool {
-        // strongest signal: CGS has dropped the WID entirely from every space (Joplin, Sprig, "show:false" Electron windows)
-        if !allCgsWindowIds.contains(wid) { return true }
-        // tagged "invisible" by CGS — disambiguate against legitimate reasons
-        if visibleCgsWindowIds.contains(wid) { return false }
-        if w.isMinimized || w.isHidden || w.isTabbed { return false }
-        // window has known spaceIds and none of them are visible → legitimate other-Space window
-        if !w.spaceIds.isEmpty && !w.spaceIds.contains(where: { Spaces.visibleSpaces.contains($0) }) { return false }
-        return true
-    }
-
     static func addRunningApplications(_ runningApps: [NSRunningApplication], _ needToVerifyFrontmostPid: Bool) {
-        runningApps.forEach {
-            let bundleIdentifier = $0.bundleIdentifier
-            let processIdentifier = $0.processIdentifier
+        runningApps.forEach { runningApp in
+            let bundleIdentifier = runningApp.bundleIdentifier
+            let processIdentifier = runningApp.processIdentifier
             if bundleIdentifier == "com.apple.dock" {
                 DockEvents.observe(processIdentifier)
             }
             // com.apple.universalcontrol always fails subscribeToNotification. We blacklist it to save resources on everyone's machines
-            if bundleIdentifier != "com.apple.universalcontrol" {
-                findOrCreate(processIdentifier, needToVerifyFrontmostPid)
+            guard bundleIdentifier != "com.apple.universalcontrol" else { return }
+            // classify off-main (process & sysctl IPC), then create on main if it's a real app (#5721).
+            // findOrCreate stays synchronous for the rarer AX-event new-pid path (it re-checks the list).
+            ProcessCallScheduler.isActualApplication(processIdentifier, bundleIdentifier) { isActual in
+                if isActual { createActualApp(runningApp) }
             }
         }
+    }
+
+    // The post-classification half of findOrCreate, for the discovery path where classification already
+    // ran off-main via ProcessCallScheduler. Runs on main; dedups by pid so it can't race a parallel creation.
+    private static func createActualApp(_ runningApp: NSRunningApplication) {
+        let pid = runningApp.processIdentifier
+        guard !(list.contains { $0.pid == pid }) else { return }
+        list.append(Application(runningApp))
     }
 
     static func removeRunningApplications(_ terminatingApps: [NSRunningApplication]) {
@@ -213,15 +259,19 @@ class Applications {
         for tApp in terminatingApps {
             let pid = tApp.processIdentifier
             AXCallScheduler.shared.removeEntry(key: "pid-\(pid)")
+            AXCallScheduler.shared.removeEntries(withPrefix: "pid-\(pid)-")
+            // one-shot subscription keys (see Application.observeEvents) use the `sub-app-` prefix, which
+            // the `pid-` cleanup above misses; strip them here too or they leak 6 entries per app.
+            AXCallScheduler.shared.removeEntry(key: "sub-app-\(pid)")
+            AXCallScheduler.shared.removeEntries(withPrefix: "sub-app-\(pid)-")
             AXCallScheduler.shared.removeUnresponsivePid(pid)
-            appListUpdateThrottler.removeEntry(withKey: "\(pid)")
         }
         App.refreshOpenUiAfterExternalEvent([])
     }
 
     static func refreshBadgesAsync() {
         guard SwitcherSession.isActive else { return }
-        badgesThrottler.throttleOrProceed {
+        dockBadgeThrottler.throttleOrProceed {
             let dockPid = list.first { $0.bundleIdentifier == "com.apple.dock" }?.pid
             AXCallScheduler.shared.schedule(key: "badges", context: "badges", pid: dockPid) {
                 guard let dockPid,
