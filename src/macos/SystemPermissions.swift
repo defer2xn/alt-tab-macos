@@ -158,6 +158,10 @@ class ScreenRecordingPermission {
     // their return value is not updated during the app lifetime
     // note: shows the system prompt if there's no permission
     private static func isGrantedOnSomeDisplay() -> Bool {
+        let osMajorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        if #available(macOS 10.15, *), WindowCapturePolicy.shouldUsePreflightPermissionCheck(osMajorVersion: osMajorVersion) {
+            return CGPreflightScreenCaptureAccess()
+        }
         if #available(macOS 12.3, *) {
             return checkWithSCShareableContent()
         } else {

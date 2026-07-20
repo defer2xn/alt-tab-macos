@@ -1,0 +1,24 @@
+enum WindowCaptureBackend: Equatable {
+    case screenCaptureKit
+    case privateApi
+}
+
+enum WindowCapturePolicy {
+    static let validatedScreenCaptureKitMajorVersion = 26
+
+    static func backend(osMajorVersion: Int) -> WindowCaptureBackend {
+        osMajorVersion == validatedScreenCaptureKitMajorVersion ? .screenCaptureKit : .privateApi
+    }
+
+    static func shouldCapture(userAllowsBackground: Bool, switcherIsActive: Bool, osMajorVersion: Int) -> Bool {
+        switcherIsActive || (userAllowsBackground && osMajorVersion < 27)
+    }
+
+    static func maxConcurrentOperations(osMajorVersion: Int) -> Int {
+        osMajorVersion >= 27 ? 2 : 8
+    }
+
+    static func shouldUsePreflightPermissionCheck(osMajorVersion: Int) -> Bool {
+        osMajorVersion >= 27
+    }
+}

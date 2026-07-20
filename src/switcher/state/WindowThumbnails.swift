@@ -46,10 +46,12 @@ enum WindowThumbnails {
     // dispatch screenshot requests off the main-thread, then wait for completion
     static func refreshAsync(_ windows: [Window], _ source: RefreshCausedBy, windowRemoved: Bool = false, prioritizedIds: Set<CGWindowID>? = nil) {
         let shortcutIndex = SwitcherSession.activeShortcutIndex
+        let osMajorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
         guard (!windows.isEmpty || windowRemoved) && ScreenRecordingPermission.status == .granted
                && !ScreenLockEvents.isScreenLocked
                && (!Appearance.hideThumbnails || Preferences.effectivePreviewSelectedWindow(shortcutIndex))
-               && (Preferences.captureWindowsInBackground || SwitcherSession.isActive) else { return }
+               && WindowCapturePolicy.shouldCapture(userAllowsBackground: Preferences.captureWindowsInBackground,
+                   switcherIsActive: SwitcherSession.isActive, osMajorVersion: osMajorVersion) else { return }
         var eligibleWindows = [Window]()
         for window in windows {
             if !window.isWindowlessApp, let cgWindowId = window.cgWindowId, cgWindowId != CGWindowID(bitPattern: -1) {
@@ -57,9 +59,7 @@ enum WindowThumbnails {
             }
         }
         guard (!eligibleWindows.isEmpty || windowRemoved) else { return }
-        if #available(macOS 14.0, *),
-           // mitigate macOS 15 bugs with ScreenCapture Kit (see https://github.com/lwouis/alt-tab-macos/issues/5190)
-           ProcessInfo.processInfo.operatingSystemVersion.majorVersion != 15 {
+        if #available(macOS 14.0, *), WindowCapturePolicy.backend(osMajorVersion: osMajorVersion) == .screenCaptureKit {
             WindowCaptureScreenshots.oneTimeScreenshots(eligibleWindows, source, prioritizedIds: prioritizedIds)
         } else {
             WindowCaptureScreenshotsPrivateApi.oneTimeScreenshots(eligibleWindows, source, prioritizedIds: prioritizedIds)

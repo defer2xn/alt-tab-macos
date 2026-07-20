@@ -48,6 +48,9 @@
 		5EA8E110000000000000F202 /* SchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA8E110000000000000F201 /* SchedulingPolicy.swift */; };
 		5EA8E110000000000000F203 /* SchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA8E110000000000000F201 /* SchedulingPolicy.swift */; };
 		5EA8E110000000000000F212 /* SchedulingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA8E110000000000000F211 /* SchedulingPolicyTests.swift */; };
+		C0DEC0010000000000000002 /* WindowCapturePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEC0010000000000000001 /* WindowCapturePolicy.swift */; };
+		C0DEC0010000000000000003 /* WindowCapturePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEC0010000000000000001 /* WindowCapturePolicy.swift */; };
+		C0DEC0010000000000000012 /* WindowCapturePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEC0010000000000000011 /* WindowCapturePolicyTests.swift */; };
 		5E5EA12C0000000000000002 /* SearchModeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5EA12C0000000000000001 /* SearchModeResolver.swift */; };
 		5E5EA12C0000000000000003 /* SearchModeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5EA12C0000000000000001 /* SearchModeResolver.swift */; };
 		5E5EA12C0000000000000102 /* SearchModeResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5EA12C0000000000000101 /* SearchModeResolverTests.swift */; };
@@ -416,6 +419,9 @@
 		D04BAE2200000000ED005T12 /* SettingsSectionSearchContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSectionSearchContentTests.swift; sourceTree = "<group>"; };
 		D04BAE2200000000ED006T12 /* SidebarListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarListTests.swift; sourceTree = "<group>"; };
 		5F04852D2F09AC9700235D4A /* WindowCaptureEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCaptureEvents.swift; sourceTree = "<group>"; };
+		C0DEC0010000000000000001 /* WindowCapturePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCapturePolicy.swift; sourceTree = "<group>"; };
+		C0DEC0010000000000000011 /* WindowCapturePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCapturePolicyTests.swift; sourceTree = "<group>"; };
+		C0DEC0010000000000000021 /* WindowCapturePolicySpecs.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = WindowCapturePolicySpecs.md; sourceTree = "<group>"; };
 		5F05D0E62F31441A004A95F9 /* AGENTS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = AGENTS.md; sourceTree = "<group>"; };
 		5F05D0E72F31441A004A95F9 /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CLAUDE.md; sourceTree = "<group>"; };
 		5F084EAF2EF15E6B00CD212A /* TabbedWindowDetection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabbedWindowDetection.swift; sourceTree = "<group>"; };
@@ -842,6 +848,9 @@
 				BF0C8B5D1A9658E64F8ECB56 /* SystemScrollerStyleEvents.swift */,
 				BF0C8F8E1B7A3C4D5E6F7081 /* ContextMenuEvents.swift */,
 				5F04852D2F09AC9700235D4A /* WindowCaptureEvents.swift */,
+				C0DEC0010000000000000001 /* WindowCapturePolicy.swift */,
+				C0DEC0010000000000000011 /* WindowCapturePolicyTests.swift */,
+				C0DEC0010000000000000021 /* WindowCapturePolicySpecs.md */,
 				D04BA4A621A8A15660F973C1 /* KeyboardEvents.swift */,
 				BF0C8643F524515224BF1618 /* KeyboardEventsTestable.swift */,
 				BF0C899905524253DC170B56 /* KeyboardEventsTests.swift */,
@@ -1862,6 +1871,8 @@
 				5EA8E110000000000000F102 /* AxEventRoutingTests.swift in Sources */,
 				5EA8E110000000000000F203 /* SchedulingPolicy.swift in Sources */,
 				5EA8E110000000000000F212 /* SchedulingPolicyTests.swift in Sources */,
+				C0DEC0010000000000000003 /* WindowCapturePolicy.swift in Sources */,
+				C0DEC0010000000000000012 /* WindowCapturePolicyTests.swift in Sources */,
 				5EA8E110000000000000DA03 /* DragAndDropResolver.swift in Sources */,
 				5EA8E110000000000000DA12 /* DragAndDropResolverTests.swift in Sources */,
 				5F4753072CEE5A2E002C6C5E /* AppearanceTestable.swift in Sources */,
@@ -2076,6 +2087,7 @@
 				AA0C8B000000000000000003 /* UsageStatsTestable.swift in Sources */,
 				BF0C83578F7292F307E30751 /* PopupButtonLikeSystemSettings.swift in Sources */,
 				5F04852E2F09AC9700235D4A /* WindowCaptureEvents.swift in Sources */,
+				C0DEC0010000000000000002 /* WindowCapturePolicy.swift in Sources */,
 				1C961F9CF4F1BEDF04ACAEE0 /* Switch.swift in Sources */,
 				1C96182D2ECA735740ED474E /* ImageTextButtonView.swift in Sources */,
 				BF0C860F1779DDE8C0171EA0 /* WindowlessAppIndicator.swift in Sources */,

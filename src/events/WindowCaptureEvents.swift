@@ -5,7 +5,7 @@ import ScreenCaptureKit
 class WindowCaptureScreenshots {
     // SCShareableContent.getExcludingDesktopWindows is expensive for the OS; we cache as much as possible.
     // Wrapped in ConcurrentArray because reads and writes happen from different operations on
-    // BackgroundWork.screenshotsQueue, which is concurrent (maxConcurrentOperationCount = 8).
+    // BackgroundWork.screenshotsQueue, whose concurrency is selected by WindowCapturePolicy.
     static let cachedSCWindows = ConcurrentArray<SCWindow>()
 
     struct CaptureRequest {
@@ -128,35 +128,47 @@ class WindowCaptureScreenshots {
 }
 
 class WindowCaptureScreenshotsPrivateApi {
+    struct CaptureRequest {
+        let window: Window
+        let wid: CGWindowID
+        let fullRes: Bool
+    }
+
     static func oneTimeScreenshots(_ eligibleWindows: [Window], _ source: RefreshCausedBy, prioritizedIds: Set<CGWindowID>? = nil) {
         let prioritized = prioritizedIds ?? []
+        let fullResWids = WindowThumbnails.fullResWids
         // iterate prioritized windows first so they enqueue (and grab queue slots) ahead of the rest
-        let sorted = eligibleWindows.sorted { a, b in
-            let aPri = a.cgWindowId.map { prioritized.contains($0) } ?? false
-            let bPri = b.cgWindowId.map { prioritized.contains($0) } ?? false
-            return aPri && !bPri
+        let requests = eligibleWindows.compactMap { window -> CaptureRequest? in
+            guard let wid = window.cgWindowId else { return nil }
+            return CaptureRequest(window: window, wid: wid, fullRes: fullResWids.contains(wid))
         }
-        for window in sorted {
-            guard let wid = window.cgWindowId else { continue }
+        let sorted = requests.sorted { a, b in
+            prioritized.contains(a.wid) && !prioritized.contains(b.wid)
+        }
+        for request in sorted {
+            let wid = request.wid
+            let fullRes = request.fullRes
             let isPrioritized = prioritized.contains(wid)
-            Applications.screenshotThrottler.throttleOrProceed(key: "capture-wid-\(wid)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window] in
+            let throttleKey = fullRes ? "capture-wid-\(wid)-fullRes" : "capture-wid-\(wid)"
+            Applications.screenshotThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                guard let wid = window?.cgWindowId, let cgImage = oneTimeCapture(wid) else { return }
+                guard let window, let cgImage = oneTimeCapture(wid, fullRes) else { return }
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                 DispatchQueue.main.async { [weak window] in
                     guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                    window?.refreshThumbnail(.cgImage(cgImage))
+                    window?.refreshThumbnail(.cgImage(cgImage), fullRes)
                 }
             }
         }
     }
 
-    private static func oneTimeCapture(_ wid: CGWindowID) -> CGImage? {
+    private static func oneTimeCapture(_ wid: CGWindowID, _ fullRes: Bool) -> CGImage? {
         guard !App.isTerminating, !ScreenLockEvents.isScreenLocked else { return nil }
         // we use CGSHWCaptureWindowList because it can screenshot minimized windows, which CGWindowListCreateImage can't
         var windowId_ = wid
         ActiveWindowCaptures.increment()
-        let list = CGSHWCaptureWindowList(CGS_CONNECTION, &windowId_, 1, [.ignoreGlobalClipShape, .bestResolution, .fullSize]).takeRetainedValue() as! [CGImage]
+        let resolution: CGSWindowCaptureOptions = fullRes ? .bestResolution : .nominalResolution
+        let list = CGSHWCaptureWindowList(CGS_CONNECTION, &windowId_, 1, [.ignoreGlobalClipShape, resolution, .fullSize]).takeRetainedValue() as! [CGImage]
         ActiveWindowCaptures.decrement()
         return list.first
     }
