@@ -21,7 +21,6 @@ class TileView: FlippedView {
     // titles 风格下前 9 个可见行的右侧用 ⌘N 快捷提示替换状态圆圈；displayIndex 是当前可见序号（0 起）
     var keyHintBadge = KeyHintView()
     var displayIndex = -1
-    var dockLabelIcon = TileFontIconView(badgeSize: TileFontIconView.badgeBaseSize(forIconSize: TileView.iconSize().width))
     var windowlessAppIndicator = WindowlessAppIndicator(tooltip: TileView.noOpenWindowToolTip)
     private var fullTitle = ""
     private var fullTitleWidth = CGFloat(0)
@@ -114,14 +113,6 @@ class TileView: FlippedView {
         label.textColor = onSolidFill ? .alternateSelectedControlTextColor : titlePrimaryColor
     }
 
-    func updateDockLabelIcon(_ dockLabel: String?) {
-        assignIfDifferent(&dockLabelIcon.isHidden, dockLabel == nil || Appearance.iconSize == 0)
-        if !dockLabelIcon.isHidden, let dockLabel {
-            dockLabelIcon.setText(dockLabel)
-            dockLabelIcon.setAccessibilityLabel(getAccessibilityTextForBadge(dockLabel))
-        }
-    }
-
     private func setupView() {
         setAccessibilityChildren([])
         wantsLayer = true
@@ -131,14 +122,12 @@ class TileView: FlippedView {
     }
 
     private func setupSharedSubviews() {
-        let shadow = TileView.makeShadow(Appearance.imagesShadowColor)
         let appIconShadow = TileView.makeAppIconShadow(Appearance.imagesShadowColor)
         let thumbnailShadow = TileView.makeThumbnailShadow(Appearance.imagesShadowColor)
         thumbnail.masksToBounds = false // let thumbnail shadows show
         thumbnail.usesShadowPath = true // 缩略图是不透明矩形，用 shadowPath 消除离屏渲染（图标保留轮廓阴影）
         thumbnail.applyShadow(thumbnailShadow)
         appIcon.applyShadow(appIconShadow)
-        dockLabelIcon.shadow = shadow
         appIconHighlight.isHidden = true
         layer!.addSublayer(appIconHighlight)
         layer!.addSublayer(appIcon)
@@ -149,7 +138,6 @@ class TileView: FlippedView {
         layer!.addSublayer(thumbnail)
         addSubviews([label, statusIcons, keyHintBadge])
         setSubviewAbove(windowlessAppIndicator)
-        addSubview(dockLabelIcon)
         configureKeyHintBadge()
         label.fixHeight()
         // Disable implicit CALayer animations on every subview that moves between styles. The
@@ -164,7 +152,6 @@ class TileView: FlippedView {
         TileView.disableImplicitLayerAnimations(on: statusIcons)
         TileView.disableImplicitLayerAnimations(on: keyHintBadge)
         TileView.disableImplicitLayerAnimations(on: windowlessAppIndicator)
-        TileView.disableImplicitLayerAnimations(on: dockLabelIcon)
     }
 
     /// Set `wantsLayer = true` and null out the implicit-animation entries in the layer's actions
@@ -362,8 +349,7 @@ class TileView: FlippedView {
             }
         }
         updateAppIcon(element, title)
-        updateDockLabelIcon(element.dockLabel)
-        setAccessibilityHelp(getAccessibilityHelp(element.application.localizedName, element.dockLabel))
+        setAccessibilityHelp(element.application.localizedName ?? "")
         mouseUpCallback = { () -> Void in App.focusSelectedWindow(element) }
         mouseMovedCallback = { () -> Void in Windows.updateSelectedAndHoveredWindowIndex(index, true) }
     }
@@ -678,16 +664,6 @@ class TileView: FlippedView {
             thumbnail.centerInSuperlayer(x: true)
         }
         updateWindowlessAppIndicatorPosition()
-        updateDockLabelIconPosition()
-    }
-
-    private func updateDockLabelIconPosition() {
-        let iconSize = max(appIcon.frame.width, appIcon.frame.height)
-        let offset = (iconSize * (TileView.cachedEffectiveStyle == .appIcons && Appearance.resolvedSize == .large ? 0.03 : 0.05)).rounded()
-        let badgeTopRightX = appIcon.frame.maxX + offset
-        let badgeTopRightY = appIcon.frame.minY - offset
-        assignIfDifferent(&dockLabelIcon.frame.origin.x, badgeTopRightX - dockLabelIcon.frame.width)
-        assignIfDifferent(&dockLabelIcon.frame.origin.y, badgeTopRightY)
     }
 
     private func updateWindowlessAppIndicatorPosition() {
@@ -744,27 +720,6 @@ class TileView: FlippedView {
         let width = max(frameWidth, widthMin).rounded()
         assignIfDifferent(&frame.size.width, width)
         assignIfDifferent(&frame.size.height, newHeight)
-    }
-
-    private func getAccessibilityHelp(_ appName: String?, _ dockLabel: String?) -> String {
-        [appName, dockLabel.map { getAccessibilityTextForBadge($0) }]
-            .compactMap { $0 }
-            .joined(separator: " - ")
-    }
-
-    private func getAccessibilityTextForBadge(_ dockLabel: String) -> String {
-        if let dockLabelInt = Int(dockLabel) {
-            return "Red badge with number \(dockLabelInt)"
-        }
-        return "Red badge"
-    }
-
-    static func makeShadow(_ color: NSColor?) -> NSShadow? {
-        let shadow = NSShadow()
-        shadow.shadowColor = color
-        shadow.shadowOffset = .zero
-        shadow.shadowBlurRadius = 1
-        return shadow
     }
 
     static func makeAppIconShadow(_ color: NSColor?) -> NSShadow? {

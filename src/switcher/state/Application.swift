@@ -18,7 +18,6 @@ class Application: NSObject {
     var executableURL: URL?
     var hasBeenActiveOnce: Bool
     var icon: CGImage?
-    var dockLabel: String?
     var focusedWindow: Window? = nil
     var alreadyRequestedToQuit = false
     var debugId: String

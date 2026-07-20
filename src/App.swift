@@ -321,8 +321,6 @@ class App: AppCenterApplication {
         Windows.voiceOverWindow() // at this point TileViews are assigned to the window, and ready
         guard SwitcherSession.isActive else { return }
         WindowThumbnails.previewSelectedIfNeeded()
-        guard SwitcherSession.isActive else { return }
-        Applications.refreshBadgesAsync()
     }
 
     static func showUiOrCycleSelection(_ shortcutIndex: Int, _ forceDoNothingOnRelease_: Bool) {

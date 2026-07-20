@@ -21,4 +21,8 @@ enum WindowCapturePolicy {
     static func shouldUsePreflightPermissionCheck(osMajorVersion: Int) -> Bool {
         osMajorVersion >= 27
     }
+
+    static func shouldCaptureWindow(showsThumbnails: Bool, isPreviewTarget: Bool) -> Bool {
+        showsThumbnails || isPreviewTarget
+    }
 }

@@ -12,8 +12,6 @@ class Applications {
     static let windowAttributesThrottler = ThrottlerWithKey(delayInMs: 200)
     // B — suppress redundant recompute: ≤1 full window-inventory scan per second (on switcher show)
     static let fullRescanThrottler = Throttler(delayInMs: 1000)
-    // B — ≤1 Dock-badge fetch per second
-    static let dockBadgeThrottler = Throttler(delayInMs: 1000)
     // C — cap a resource: ≤1 thumbnail capture per window per 200ms
     static let screenshotThrottler = ThrottlerWithKey(delayInMs: 200)
 
@@ -267,46 +265,6 @@ class Applications {
             AXCallScheduler.shared.removeUnresponsivePid(pid)
         }
         App.refreshOpenUiAfterExternalEvent([])
-    }
-
-    static func refreshBadgesAsync() {
-        guard SwitcherSession.isActive else { return }
-        dockBadgeThrottler.throttleOrProceed {
-            let dockPid = list.first { $0.bundleIdentifier == "com.apple.dock" }?.pid
-            AXCallScheduler.shared.schedule(key: "badges", context: "badges", pid: dockPid) {
-                guard let dockPid,
-                    let axDockChildren = try AXUIElementCreateApplication(dockPid).attributes([kAXChildrenAttribute]).children,
-                    let axListAttrs = (axDockChildren.lazy.compactMap { try? $0.attributes([kAXRoleAttribute, kAXChildrenAttribute]) }.first { $0.role == kAXListRole }),
-                    let axListChildren = axListAttrs.children else { return }
-                let axAppDockItemUrlAndLabel: [(URL?, String?)] = try axListChildren.compactMap {
-                    let a = try $0.attributes([kAXSubroleAttribute, kAXIsApplicationRunningAttribute, kAXURLAttribute, kAXStatusLabelAttribute])
-                    guard a.subrole == kAXApplicationDockItemSubrole && (a.appIsRunning ?? false) else { return nil }
-                    return (a.url, a.statusLabel)
-                }
-                guard !axAppDockItemUrlAndLabel.isEmpty else { return }
-                DispatchQueue.main.async {
-                    guard SwitcherSession.isActive else { return }
-                    refreshBadges_(axAppDockItemUrlAndLabel)
-                }
-            }
-        }
-    }
-
-    static func refreshBadges_(_ items: [(URL?, String?)]) {
-        Windows.list.enumerated().forEach { (i, window) in
-            let view = TilesView.recycledViews[i]
-            if let app = findOrCreate(window.application.pid, false) {
-                if app.runningApplication.activationPolicy == .regular,
-                   let matchingItem = (items.first { $0.0 == app.bundleURL }),
-                   let label = matchingItem.1 {
-                    app.dockLabel = label
-                    view.updateDockLabelIcon(label)
-                } else {
-                    app.dockLabel = nil
-                    assignIfDifferent(&view.dockLabelIcon.isHidden, true)
-                }
-            }
-        }
     }
 
     @discardableResult

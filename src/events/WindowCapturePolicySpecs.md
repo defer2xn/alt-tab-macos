@@ -7,3 +7,4 @@ Window thumbnails must remain responsive without allowing a new macOS release to
 - On macOS 27 and newer, capture work is limited to two concurrent operations.
 - On macOS 27 and newer, startup permission detection uses the lightweight CoreGraphics preflight instead of creating a ScreenCaptureKit shareable-content session.
 - Private-API captures use nominal resolution for ordinary thumbnails and best resolution only for the selected preview and its prefetched neighbors.
+- Titles and App Icons styles capture only the selected preview and its prefetched neighbors; windows without visible thumbnails are skipped.

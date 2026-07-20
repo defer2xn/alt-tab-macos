@@ -53,8 +53,10 @@ enum WindowThumbnails {
                && WindowCapturePolicy.shouldCapture(userAllowsBackground: Preferences.captureWindowsInBackground,
                    switcherIsActive: SwitcherSession.isActive, osMajorVersion: osMajorVersion) else { return }
         var eligibleWindows = [Window]()
+        let previewTargetWids = fullResWids
         for window in windows {
-            if !window.isWindowlessApp, let cgWindowId = window.cgWindowId, cgWindowId != CGWindowID(bitPattern: -1) {
+            if !window.isWindowlessApp, let cgWindowId = window.cgWindowId, cgWindowId != CGWindowID(bitPattern: -1),
+               WindowCapturePolicy.shouldCaptureWindow(showsThumbnails: !Appearance.hideThumbnails, isPreviewTarget: previewTargetWids.contains(cgWindowId)) {
                 eligibleWindows.append(window)
             }
         }

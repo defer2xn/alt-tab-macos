@@ -23,7 +23,6 @@ class Window {
     var shouldShowTheUser = true
     var tabbedSiblingWids: [CGWindowID]?
     var isHidden: Bool { get { application.isHidden } }
-    var dockLabel: String? { get { application.dockLabel } }
     var position: CGPoint?
     var size: CGSize?
     var screenId: ScreenUuid?

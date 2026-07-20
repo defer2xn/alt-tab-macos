@@ -25,4 +25,10 @@ final class WindowCapturePolicyTests: XCTestCase {
         XCTAssertTrue(WindowCapturePolicy.shouldUsePreflightPermissionCheck(osMajorVersion: 27))
         XCTAssertTrue(WindowCapturePolicy.shouldUsePreflightPermissionCheck(osMajorVersion: 28))
     }
+
+    func testHiddenThumbnailsOnlyCapturePreviewTargets() {
+        XCTAssertFalse(WindowCapturePolicy.shouldCaptureWindow(showsThumbnails: false, isPreviewTarget: false))
+        XCTAssertTrue(WindowCapturePolicy.shouldCaptureWindow(showsThumbnails: false, isPreviewTarget: true))
+        XCTAssertTrue(WindowCapturePolicy.shouldCaptureWindow(showsThumbnails: true, isPreviewTarget: false))
+    }
 }
