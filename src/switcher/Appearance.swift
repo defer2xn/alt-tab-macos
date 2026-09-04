@@ -31,7 +31,7 @@ class Appearance {
     // 次级文本色：用于"应用名 + 窗口标题"行内分层时的窗口标题段，制造层次
     static var secondaryFontColor = NSColor.secondaryLabelColor
     static var imagesShadowColor = NSColor.red // for icon, thumbnail and windowless images
-    static var material = NSVisualEffectView.Material.ultraDark
+    static var material = LegacyMaterial.ultraDark
     static var highlightBorderWidth = CGFloat(3)
     // titles 选中态左侧指示条宽度，由 updateTheme() 设置：titles 为非 0，其余样式为 0（不绘制）
     static var highlightFocusedIndicatorWidth = CGFloat(0)
@@ -95,7 +95,7 @@ class Appearance {
             lightTheme()
         }
         // for Liquid Glass, we don't want a shadow around the panel
-        if #available(macOS 26.0, *), currentStyle == .appIcons && LiquidGlassEffectView.canUsePrivateLiquidGlassLook() {
+        if #available(macOS 26.0, *), currentStyle == .appIcons && LiquidGlass.canUsePrivateLook {
             enablePanelShadow = false
         } else {
             enablePanelShadow = true
@@ -202,11 +202,21 @@ class Appearance {
 
     private static func lightTheme() {
         imagesShadowColor = .gray.withAlphaComponent(0.8)
-        material = .mediumLight
+        material = LegacyMaterial.mediumLight
     }
 
     private static func darkTheme() {
         imagesShadowColor = .gray.withAlphaComponent(0.8)
-        material = .dark
+        material = LegacyMaterial.dark
     }
+}
+
+/// The only `NSVisualEffectView.Material` values that pin light or dark explicitly. Deprecated in
+/// 10.14 in favour of semantic materials, which we can't use: those follow the view's
+/// `NSAppearance`, whereas our theme comes from the user's own preference (see `updateTheme`).
+/// Referenced by rawValue because naming the cases trips `SWIFT_TREAT_WARNINGS_AS_ERRORS`.
+enum LegacyMaterial {
+    static let dark = NSVisualEffectView.Material(rawValue: 2)!
+    static let mediumLight = NSVisualEffectView.Material(rawValue: 8)!
+    static let ultraDark = NSVisualEffectView.Material(rawValue: 9)!
 }

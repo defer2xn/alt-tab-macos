@@ -122,12 +122,7 @@ class TileView: FlippedView {
     }
 
     private func setupSharedSubviews() {
-        let appIconShadow = TileView.makeAppIconShadow(Appearance.imagesShadowColor)
-        let thumbnailShadow = TileView.makeThumbnailShadow(Appearance.imagesShadowColor)
         thumbnail.masksToBounds = false // let thumbnail shadows show
-        thumbnail.usesShadowPath = true // 缩略图是不透明矩形，用 shadowPath 消除离屏渲染（图标保留轮廓阴影）
-        thumbnail.applyShadow(thumbnailShadow)
-        appIcon.applyShadow(appIconShadow)
         appIconHighlight.isHidden = true
         layer!.addSublayer(appIconHighlight)
         layer!.addSublayer(appIcon)
@@ -152,6 +147,28 @@ class TileView: FlippedView {
         TileView.disableImplicitLayerAnimations(on: statusIcons)
         TileView.disableImplicitLayerAnimations(on: keyHintBadge)
         TileView.disableImplicitLayerAnimations(on: windowlessAppIndicator)
+        applyShadows()
+    }
+
+    /// Re-apply every appearance-baked value on the long-lived subviews so a recycled tile can be
+    /// reused across an appearance/screen/size change instead of being reallocated. Reallocating used
+    /// to be how `TilesView.reset()` picked up these changes, but it freed the tooltip-owning subviews
+    /// (label, statusIcons, windowlessAppIndicator) out from under NSToolTipManager, which crashed when
+    /// an in-flight tooltip timer later fired. Reusing the objects retires that whole class of bug.
+    /// Per-show layout (`updateRecycledCellWithNewContent`) already refreshes frames and content; this
+    /// only covers the state baked at construction time.
+    func reapplyAppearance() {
+        label.reapplyAppearance()
+        statusIcons.reapplyAppearance()
+        windowlessAppIndicator.reapplyAppearance()
+        applyShadows()
+        applyCurrentStyle()
+    }
+
+    private func applyShadows() {
+        thumbnail.usesShadowPath = true // 缩略图是不透明矩形，用 shadowPath 消除离屏渲染（图标保留轮廓阴影）
+        thumbnail.applyShadow(TileView.makeThumbnailShadow(Appearance.imagesShadowColor))
+        appIcon.applyShadow(TileView.makeAppIconShadow(Appearance.imagesShadowColor))
     }
 
     /// Set `wantsLayer = true` and null out the implicit-animation entries in the layer's actions

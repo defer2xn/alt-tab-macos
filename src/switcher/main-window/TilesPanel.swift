@@ -91,6 +91,12 @@ class TilesPanel: NSPanel {
         // and Appearance are in their final state.
         alphaValue = 1
         makeKeyAndOrderFront(nil)
+        // The artificial key-repeat measures its initial-delay grace from when the panel could be SEEN, and this
+        // is the only anchor for that which is guaranteed to exist — see `SwitcherSession.panelShownAt`. Set
+        // once per summon (a re-show within one session must not restart the grace under the user's fingers).
+        if let session = SwitcherSession.current, session.panelShownAt == nil {
+            session.panelShownAt = ProcessInfo.processInfo.systemUptime
+        }
         ContextMenuEvents.toggle(true)
         CursorEvents.toggle(true)
         DispatchQueue.main.async { TilesView.scrollView.flashScrollers() }
@@ -168,8 +174,15 @@ extension TilesPanel: NSWindowDelegate {
                 MainMenu.toggleEditMenu(true)
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        // Refresh the window model once the main run loop next goes idle after showing — i.e. after AppKit has
+        // finished ALL the show's main-thread work for this frame. A one-shot kCFRunLoopBeforeWaiting observer
+        // fires only when the loop is about to sleep, so it provably can't preempt the render, yet still runs
+        // ASAP with no timer guess. (Replaces a 0.25s timer, then a CATransaction-commit hook that fired mid
+        // -render and let the reconcile's re-layout race the first frame.)
+        let refreshObserver = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, false, 0) { observer, _ in
+            if let observer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
             Applications.manuallyRefreshAllWindows()
         }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), refreshObserver, .commonModes)
     }
 }

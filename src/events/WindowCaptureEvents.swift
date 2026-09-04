@@ -1,27 +1,8 @@
 import Cocoa
 import ScreenCaptureKit
 
-private struct WindowCaptureKey: Hashable {
-    let wid: CGWindowID
-    let fullRes: Bool
-}
-
-private enum WindowCaptureInFlight {
-    private static let captures = ConcurrentMap<WindowCaptureKey, Bool>()
-
-    static func acquire(_ key: WindowCaptureKey) -> Bool {
-        captures.withLock { captures in
-            guard captures[key] == nil else { return false }
-            captures[key] = true
-            return true
-        }
-    }
-
-    static func release(_ key: WindowCaptureKey) {
-        captures.withLock { $0[key] = nil }
-    }
-}
-
+/// 队列里的截图任务可能在排队期间失去截图资格（switcher 已关闭、或 macOS 27 上后台截图被抑制）。
+/// 在真正进入 WindowServer 之前复检一次，避免把已经无用的请求压给系统截图栈。
 private func shouldExecuteQueuedWindowCapture() -> Bool {
     WindowCapturePolicy.shouldCapture(
         userAllowsBackground: Preferences.captureWindowsInBackground,
@@ -33,36 +14,32 @@ private func shouldExecuteQueuedWindowCapture() -> Bool {
 class WindowCaptureScreenshots {
     // SCShareableContent.getExcludingDesktopWindows is expensive for the OS; we cache as much as possible.
     // Wrapped in ConcurrentArray because reads and writes happen from different operations on
-    // BackgroundWork.screenshotsQueue, whose concurrency is selected by WindowCapturePolicy.
+    // BackgroundWork.screenshotsQueue, which is concurrent (maxConcurrentOperationCount = 8).
     static let cachedSCWindows = ConcurrentArray<SCWindow>()
 
     struct CaptureRequest {
         let window: Window
         let size: CGSize
         let scaleFactor: CGFloat
+        let isFullscreen: Bool
         let fullRes: Bool
     }
 
-    static func oneTimeScreenshots(_ windowsToScreenshot: [Window], _ source: RefreshCausedBy, prioritizedIds: Set<CGWindowID>? = nil) {
+    /// `fullRes: false` = thumbnail-scale captures, delivered to `Window.thumbnail`.
+    /// `fullRes: true` = full-resolution Preview frames, delivered to the session's capped cache (#5861).
+    static func oneTimeScreenshots(_ windowsToScreenshot: [Window], _ source: RefreshCausedBy, prioritizedIds: Set<CGWindowID>? = nil, fullRes: Bool = false) {
         // Snapshot Window state on the main thread before hopping to screenshotsQueue. Windows.byWindowId,
         // Window.size, Window.screenId, Screens.all, and NSScreen.preferred are plain (lock-free) dictionaries
         // and mutable properties touched only on main; reading them from screenshotsQueue (8-way concurrent)
         // races with main-thread mutation and can corrupt the heap.
         // Trade-off: size is fixed at call time, so a window resized between snapshot and capture will be captured
         // at the old size. Acceptable because the next refresh will re-snapshot.
-        // 仅「被预览窗口 + 导航相邻的预取窗口」需要全分辨率（见 WindowThumbnails.fullResWids）；其余截缩略图尺寸即可，
-        // 省下成倍内存。fullResWids 在主线程维护，这里也在主线程读取，无竞态。
-        let fullResWids = WindowThumbnails.fullResWids
         var requests = [CGWindowID: CaptureRequest]()
         for window in windowsToScreenshot {
             guard let wid = window.cgWindowId, let size = window.size else { continue }
-            let scaleFactor: CGFloat
-            if let screenId = window.screenId, let screen = Screens.all[screenId] {
-                scaleFactor = screen.backingScaleFactor
-            } else {
-                scaleFactor = NSScreen.preferred.backingScaleFactor
-            }
-            requests[wid] = CaptureRequest(window: window, size: size, scaleFactor: scaleFactor, fullRes: fullResWids.contains(wid))
+            let scaleFactor = WindowThumbnails.captureScaleFactor(window)
+            requests[wid] = CaptureRequest(window: window, size: size, scaleFactor: scaleFactor,
+                isFullscreen: window.isFullscreen, fullRes: fullRes)
         }
         guard !requests.isEmpty else { return }
         let prioritized = prioritizedIds ?? []
@@ -95,11 +72,9 @@ class WindowCaptureScreenshots {
             BackgroundWork.screenshotsQueue.addOperation {
                 cachedSCWindows.withLock { $0 = shareableContent.windows }
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                // O(N) 一次性建 wid→SCWindow 索引，下方循环 O(1) 查询；保留首个匹配以等价 first { ... } 语义
-                let scWindowsByWid = Dictionary(shareableContent.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
                 for notCachedWindow in notCachedWindows {
                     guard let request = requests[notCachedWindow] else { continue }
-                    if let cachedWindow = scWindowsByWid[notCachedWindow] {
+                    if let cachedWindow = (shareableContent.windows.first { $0.windowID == notCachedWindow }) {
                         oneTimeCapture(cachedWindow, request, source, prioritized.contains(notCachedWindow))
                     } else {
                         Logger.debug { "wid:\(notCachedWindow) was not found in SCShareableContent windows" }
@@ -110,99 +85,127 @@ class WindowCaptureScreenshots {
     }
 
     private static func sortCachedAndNotCached(_ windows: [CGWindowID]) -> ([SCWindow], [CGWindowID]) {
-        // 锁内只做 O(1) 的 Array COW 快照，立刻释放锁；O(N) 的 dict 构建和 O(M) 查询放锁外，避免阻塞其它截图回调写 cache
-        let snapshot = cachedSCWindows.withLock { $0 }
-        let scWindowsByWid = Dictionary(snapshot.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
-        var cachedWindows = [SCWindow]()
-        var notCachedWindows = [CGWindowID]()
-        for window in windows {
-            if let cachedWindow = scWindowsByWid[window] {
-                cachedWindows.append(cachedWindow)
-            } else {
-                notCachedWindows.append(window)
+        return cachedSCWindows.withLock { cache in
+            var cachedWindows = [SCWindow]()
+            var notCachedWindows = [CGWindowID]()
+            for window in windows {
+                if let cachedWindow = (cache.first { $0.windowID == window }) {
+                    cachedWindows.append(cachedWindow)
+                } else {
+                    notCachedWindows.append(window)
+                }
             }
+            return (cachedWindows, notCachedWindows)
         }
-        return (cachedWindows, notCachedWindows)
     }
 
     private static func oneTimeCapture(_ scWindow: SCWindow, _ request: CaptureRequest, _ source: RefreshCausedBy, _ isPrioritized: Bool = false) {
         let size = request.size
         let scaleFactor = request.scaleFactor
-        let fullRes = request.fullRes // 值类型，单独取出避免在内层 completion 强引用 request（保住 [weak window]）
-        // 全分辨率补截只服务被预览的那个窗口，必须和同一 wid 的缩略图截图分用不同的节流键：
-        // show/导航时整批窗口刚按缩略图尺寸截过，占用了 "capture-wid-<wid>" 的 200ms 配额；
-        // 若全分辨率补截共用该键，会被 scheduleTail 推迟最多 200ms，预览就停在缩略图重采样的模糊态。
-        // 独立键仍对全分辨率截图自身限频 200ms，不会因此连发而冲击 OS 截图调用。
-        let throttleKey = fullRes ? "capture-wid-\(scWindow.windowID)-fullRes" : "capture-wid-\(scWindow.windowID)"
+        // distinct key per resolution: a preview fetch must not be coalesced away by the thumbnail
+        // capture of the same window submitted milliseconds earlier at show time
+        let keyPrefix = request.fullRes ? "preview" : "capture"
         // [weak window] avoids keeping a closed Window alive while the capture is queued or in-flight with the OS
-        Applications.screenshotThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
-            let captureKey = WindowCaptureKey(wid: scWindow.windowID, fullRes: fullRes)
-            guard shouldExecuteQueuedWindowCapture(), !App.isTerminating, !ScreenLockEvents.isScreenLocked, let window,
-                  WindowCaptureInFlight.acquire(captureKey) else { return }
-            let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false, fullRes)
+        Applications.screenshotThrottler.throttleOrProceed(key: "\(keyPrefix)-wid-\(scWindow.windowID)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
+            guard shouldExecuteQueuedWindowCapture(), !App.isTerminating, !ScreenLockEvents.isScreenLocked, let window else { return }
+            let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, request.fullRes, false)
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
             ActiveWindowCaptures.increment()
-            SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { [weak window] sampleBuffer, error in
-                ActiveWindowCaptures.decrement()
-                WindowCaptureInFlight.release(captureKey)
-                guard let window else { return }
-                guard let sampleBuffer, error == nil else { Logger.error { "\(window.debugId) \(sampleBuffer == nil) \(error)" }; return }
-                guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                guard let pixelBuffer = sampleBuffer.pixelBuffer() ?? sampleBuffer.imageBuffer else { Logger.error { "\(window.debugId) no pixelBuffer" }; return }
-                DispatchQueue.main.async {
-                    guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                    window.refreshThumbnail(.pixelBuffer(pixelBuffer), fullRes)
+            // captureSampleBuffer spins up a short-lived capture stream per call; on some macOS 26 machines that
+            // churn leaks WindowServer memory until the session is force-logged-out (#5786), and the per-call
+            // replayd attribution work can wedge screenshots machine-wide under bursts (#5861). captureScreenshot
+            // avoids the churn but fails (SCStreamError -3811) on fullscreen windows whose Space is inactive, so
+            // that one case stays on captureSampleBuffer. Its CGImage copy (vs a shared IOSurface) is acceptable
+            // even at full resolution now that Preview frames are fetched lazily, a few per session (#5861).
+            if #available(macOS 26.0, *), !request.isFullscreen {
+                captureScreenshot(filter, config, window, source, request.fullRes)
+            } else {
+                captureSampleBuffer(filter, config, window, source, request.fullRes)
+            }
+        }
+    }
+
+    @available(macOS 26.0, *)
+    private static func captureScreenshot(_ filter: SCContentFilter, _ streamConfig: SCStreamConfiguration, _ window: Window, _ source: RefreshCausedBy, _ fullRes: Bool) {
+        let config = SCScreenshotConfiguration()
+        config.width = streamConfig.width
+        config.height = streamConfig.height
+        config.showsCursor = false
+        config.dynamicRange = .sdr
+        SCScreenshotManager.captureScreenshot(contentFilter: filter, configuration: config) { [weak window] output, error in
+            ActiveWindowCaptures.decrement()
+            guard let window else { return }
+            // no captureSampleBuffer fallback: the only known failure is a stale isFullscreen snapshot during a
+            // fullscreen transition, and the next refresh re-routes it. Retrying here would silently reintroduce
+            // the stream churn this path exists to avoid, and would hide new failure modes from the logs.
+            guard let cgImage = output?.sdrImage, error == nil else { Logger.error { "\(window.debugId) \(output == nil) \(error)" }; return }
+            deliver(window, source, .cgImage(cgImage), fullRes)
+        }
+    }
+
+    private static func captureSampleBuffer(_ filter: SCContentFilter, _ config: SCStreamConfiguration, _ window: Window, _ source: RefreshCausedBy, _ fullRes: Bool) {
+        SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { [weak window] sampleBuffer, error in
+            ActiveWindowCaptures.decrement()
+            guard let window else { return }
+            guard let sampleBuffer, error == nil else { Logger.error { "\(window.debugId) \(sampleBuffer == nil) \(error)" }; return }
+            guard let pixelBuffer = sampleBuffer.pixelBuffer() ?? sampleBuffer.imageBuffer else { Logger.error { "\(window.debugId) no pixelBuffer" }; return }
+            deliver(window, source, .pixelBuffer(pixelBuffer), fullRes)
+        }
+    }
+
+    private static func deliver(_ window: Window, _ source: RefreshCausedBy, _ contents: CALayerContents, _ fullRes: Bool) {
+        guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+        DispatchQueue.main.async { [weak window] in
+            guard let window, source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+            if fullRes {
+                // full-res Preview frames go to the session's capped cache, not Window.thumbnail, so they
+                // are released when the session ends; swap the sharp frame in if it's the one being previewed
+                guard let session = SwitcherSession.current, let wid = window.cgWindowId else { return }
+                // a mid-animation frame is refused here too; leaving the cache empty makes the next selection
+                // move re-fetch it, and the thumbnail stands in as the Preview's placeholder meanwhile
+                guard !WindowThumbnails.isPartialFrame(window, contents, fullRes: true) else { return }
+                session.storePreviewFrame(wid, contents)
+                if let position = window.position, let size = window.size {
+                    PreviewPanel.updateIfShowing(wid, contents, position, size)
                 }
+            } else {
+                window.refreshThumbnail(contents)
             }
         }
     }
 }
 
 class WindowCaptureScreenshotsPrivateApi {
-    struct CaptureRequest {
-        let window: Window
-        let wid: CGWindowID
-        let fullRes: Bool
-    }
-
     static func oneTimeScreenshots(_ eligibleWindows: [Window], _ source: RefreshCausedBy, prioritizedIds: Set<CGWindowID>? = nil) {
         let prioritized = prioritizedIds ?? []
-        let fullResWids = WindowThumbnails.fullResWids
         // iterate prioritized windows first so they enqueue (and grab queue slots) ahead of the rest
-        let requests = eligibleWindows.compactMap { window -> CaptureRequest? in
-            guard let wid = window.cgWindowId else { return nil }
-            return CaptureRequest(window: window, wid: wid, fullRes: fullResWids.contains(wid))
+        let sorted = eligibleWindows.sorted { a, b in
+            let aPri = a.cgWindowId.map { prioritized.contains($0) } ?? false
+            let bPri = b.cgWindowId.map { prioritized.contains($0) } ?? false
+            return aPri && !bPri
         }
-        let sorted = requests.sorted { a, b in
-            prioritized.contains(a.wid) && !prioritized.contains(b.wid)
-        }
-        for request in sorted {
-            let wid = request.wid
-            let fullRes = request.fullRes
+        for window in sorted {
+            guard let wid = window.cgWindowId else { continue }
             let isPrioritized = prioritized.contains(wid)
-            let throttleKey = fullRes ? "capture-wid-\(wid)-fullRes" : "capture-wid-\(wid)"
-            Applications.screenshotThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
-                let captureKey = WindowCaptureKey(wid: wid, fullRes: fullRes)
-                guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive,
-                      let window, WindowCaptureInFlight.acquire(captureKey) else { return }
-                defer { WindowCaptureInFlight.release(captureKey) }
-                guard let cgImage = oneTimeCapture(wid, fullRes) else { return }
-                guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+            Applications.screenshotThrottler.throttleOrProceed(key: "capture-wid-\(wid)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window] in
+                guard shouldExecuteQueuedWindowCapture(),
+                      source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                guard let wid = window?.cgWindowId, let cgImage = oneTimeCapture(wid) else { return }
+                guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                 DispatchQueue.main.async { [weak window] in
-                    guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                    window?.refreshThumbnail(.cgImage(cgImage), fullRes)
+                    guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                    window?.refreshThumbnail(.cgImage(cgImage))
                 }
             }
         }
     }
 
-    private static func oneTimeCapture(_ wid: CGWindowID, _ fullRes: Bool) -> CGImage? {
+    private static func oneTimeCapture(_ wid: CGWindowID) -> CGImage? {
         guard !App.isTerminating, !ScreenLockEvents.isScreenLocked else { return nil }
         // we use CGSHWCaptureWindowList because it can screenshot minimized windows, which CGWindowListCreateImage can't
         var windowId_ = wid
         ActiveWindowCaptures.increment()
-        let resolution: CGSWindowCaptureOptions = fullRes ? .bestResolution : .nominalResolution
-        let list = CGSHWCaptureWindowList(CGS_CONNECTION, &windowId_, 1, [.ignoreGlobalClipShape, resolution, .fullSize]).takeRetainedValue() as! [CGImage]
+        let list = CGSHWCaptureWindowList(CGS_CONNECTION, &windowId_, 1, [.ignoreGlobalClipShape, .bestResolution, .fullSize]).takeRetainedValue() as! [CGImage]
         ActiveWindowCaptures.decrement()
         return list.first
     }
@@ -336,7 +339,7 @@ class WindowCaptureScreenshotsPrivateApi {
 extension SCStreamConfiguration {
     // size/scaleFactor are snapshotted on the main thread by the caller; we do not touch Window state here
     // (Window properties are mutated on main and would race with this background work).
-    static func forWindow(_ scWindow: SCWindow, _ size: CGSize, _ scaleFactor: CGFloat, _ video: Bool, _ fullRes: Bool) -> SCStreamConfiguration {
+    static func forWindow(_ scWindow: SCWindow, _ size: CGSize, _ scaleFactor: CGFloat, _ fullRes: Bool, _ video: Bool) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.setWindowSize(size, scaleFactor, fullRes)
         config.pixelFormat = kCVPixelFormatType_32BGRA
@@ -355,22 +358,9 @@ extension SCStreamConfiguration {
     }
 
     private func setWindowSize(_ size: CGSize, _ scaleFactor: CGFloat, _ fullRes: Bool) {
-        // window.size is the logical size and doesn't change with scaleFactor. We need to correct for this as we need to capture more or less pixels depending on DPI.
-        let originalSize = NSSize(width: size.width * scaleFactor, height: size.height * scaleFactor)
-        guard originalSize.width > 0, originalSize.height > 0 else { return }
-        // 全分辨率仅用于「正被预览的那个窗口」（预览面板按窗口真实逻辑尺寸 1:1 显示，需要 logical×scale 的像素）。
-        // 其余窗口只在 tiles 里按缩略图尺寸显示，截缩略图尺寸即可，省下成倍 IOSurface 内存。由调用方按 previewedWid 决定。
-        if fullRes {
-            width = Int(originalSize.width)
-            height = Int(originalSize.height)
-        } else {
-            // capture screenshots as small as needed for the thumbnails
-            let maxSize = TilesPanel.maxPossibleThumbnailSize
-            guard maxSize.width > 0, maxSize.height > 0 else { return }
-            let scale = min(1.0, maxSize.width / originalSize.width, maxSize.height / originalSize.height)
-            width = Int((originalSize.width * scale).rounded())
-            height = Int((originalSize.height * scale).rounded())
-        }
+        guard let pixels = WindowThumbnails.capturePixelSize(size, scaleFactor, fullRes) else { return }
+        width = Int(pixels.width)
+        height = Int(pixels.height)
     }
 }
 

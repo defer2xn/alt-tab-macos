@@ -49,7 +49,7 @@ class ControlsTab {
     static var shortcutEditorContentWidth: CGFloat { shortcutEditorWidth - shortcutEditorRightPadding }
     private static let gestureSelectionIndex = -1
     private static let staticManagedShortcutPreferences = [
-        "focusWindowShortcut", "previousWindowShortcut", "cancelShortcut", "searchShortcut", "lockSearchShortcut",
+        "focusWindowShortcut", "previousWindowShortcut", "cancelShortcut", "searchShortcut",
         "closeWindowShortcut", "minDeminWindowShortcut", "toggleFullscreenWindowShortcut", "quitAppShortcut", "hideShowAppShortcut",
     ]
     /// Canonical id → localized label for the always-active ("when active") shortcuts. Single source
@@ -60,7 +60,6 @@ class ControlsTab {
         "previousWindowShortcut": NSLocalizedString("Select previous window", comment: ""),
         "cancelShortcut": NSLocalizedString("Cancel", comment: ""),
         "searchShortcut": NSLocalizedString("Search", comment: ""),
-        "lockSearchShortcut": NSLocalizedString("Lock search", comment: ""),
         "closeWindowShortcut": NSLocalizedString("Close window", comment: ""),
         "minDeminWindowShortcut": NSLocalizedString("Minimize/Deminimize window", comment: ""),
         "toggleFullscreenWindowShortcut": NSLocalizedString("Fullscreen/Defullscreen window", comment: ""),
@@ -788,6 +787,7 @@ class ControlsTab {
     /// binds Escape; otherwise Esc passes through to the active app unchanged.
     static func recomputeEscapeAbsorption() {
         KeyboardEvents.anyShortcutUsesEscape = shortcuts.values.contains { $0.shortcut.carbonKeyCode == kVK_Escape }
+        KeyboardEvents.updateEscapeAbsorptionTap()
     }
 
     /// Thin adapter over `NativeHotkeyResolver.resolve` — builds the snapshot inputs from the live
@@ -876,15 +876,7 @@ class ControlsTab {
             if SettingsWindow.shared == nil || !shouldClearConflictingShortcuts(conflicts.map { $0.value }, NSLocalizedString("Arrow keys already assigned to other actions:\n%@", comment: "")) {
                 return false
             }
-            conflicts.forEach {
-                removeShortcutIfExists($0.key)
-                let existing = shortcutControls[$0.key]
-                if existing != nil {
-                    existing!.0.objectValue = nil
-                    shortcutChangedCallback(existing!.0)
-                    LabelAndControl.controlWasChanged(existing!.0, $0.key)
-                }
-            }
+            conflicts.forEach { unassignShortcut($0.key) }
         }
         return true
     }
@@ -918,15 +910,7 @@ class ControlsTab {
             if SettingsWindow.shared == nil || !shouldClearConflictingShortcuts(conflicts.map { $0.value }, NSLocalizedString("Vim keys already assigned to other actions:\n%@", comment: "")) {
                 return false
             }
-            conflicts.forEach {
-                removeShortcutIfExists($0.key)
-                let existing = shortcutControls[$0.key]
-                if existing != nil {
-                    existing!.0.objectValue = nil
-                    shortcutChangedCallback(existing!.0)
-                    LabelAndControl.controlWasChanged(existing!.0, $0.key)
-                }
-            }
+            conflicts.forEach { unassignShortcut($0.key) }
         }
         return true
     }

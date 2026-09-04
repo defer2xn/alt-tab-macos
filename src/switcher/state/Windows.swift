@@ -3,6 +3,33 @@ import Cocoa
 class Windows {
     static var list = [Window]()
     private(set) static var byWindowId = [CGWindowID: Window]()
+    /// wids that received a focus signal (an 808, a visible-Space join, an in-app raise) while still
+    /// untracked, with the time it happened. `.discoveryLanded` consumes it to place the window at the MRU
+    /// position that time earns — so a freshly-focused window (one of many from spamming cmd-N, or an app
+    /// re-showing a window it had hidden) is neither stranded at the back nor wrongly given a front the user
+    /// has since left. Cleared on destroy/removal. See `TrackedWindowState.FocusPromotion`.
+    static var windowsPendingFocusPromotion = [CGWindowID: TrackedWindowState.FocusPromotion]()
+    /// wids flagged brand-new by a WindowServer `windowCreated` event, not yet promoted in the MRU. A new window
+    /// must land at the front, but the focus event (808) that would do it isn't a reliable trigger: it only
+    /// fires while the window's app is frontmost, and even then can be *processed* a beat late — after the user
+    /// moved on (cmd-N burst, then open AltTab) — where the `isActive` guard in `bumpFocusOrder` drops it and
+    /// strands the window at the back. So `appendWindow` promotes any window in this set the moment it's tracked,
+    /// independent of discovery path (event or full rescan) and of focus events; `bumpFocusOrder` also honors it
+    /// for the create-after-append ordering. Consumed on the first promotion; cleared on destroy/removal.
+    static var recentlyCreatedWindows = Set<CGWindowID>()
+    /// wids that got a `windowRemovedFromSpace` (1326) while still UNtracked — the delta was dropped because
+    /// there was no `Window` to apply it to. During a rapid tab burst a new tab backgrounds (loses its Space)
+    /// before its async discovery lands, so discovery would otherwise keep the wrong current-Space default and
+    /// the background tab would show as a separate window until the next show (#5830). `addDiscoveredWindow`
+    /// consumes this to record the tab Space-less at discovery. Cleared if the wid is re-added to a Space, or
+    /// on destroy/removal.
+    static var windowsPendingSpaceRemoval = [CGWindowID: UInt64]()
+    /// wids of tabs that just backgrounded (Space-less) as a new tab took over, kept visible through the
+    /// ~250ms until the new tab is discovered and groups them — so the group never drops to zero tiles (the
+    /// "window vanishes → app icon → window" gap). The derived `Window.isPhantom` reports a held wid
+    /// non-phantom; `WindowServerEvents` inserts on the backgrounding 1326 (only right after a create) and
+    /// clears on a timeout, on removal, or once the wid becomes a real background tab (`isTabbed`, hidden anyway).
+    static var windowsHeldVisibleForTab = Set<CGWindowID>()
     private static var lastWindowActivityType = WindowActivityType.none
     private static var shouldSelectBestMatchOnSearchChange = false
     private static var shouldRestoreDefaultSelectionOnSearchClear = false
@@ -46,18 +73,6 @@ class Windows {
         sort()
     }
 
-    static func updateIsFullscreenOnCurrentSpace() {
-        let windowsOnCurrentSpace = list.filter { !$0.isWindowlessApp }
-        for window in windowsOnCurrentSpace {
-            guard let wid = window.cgWindowId, let axUiElement = window.axUiElement else { continue }
-            AXCallScheduler.shared.schedule(key: "wid-\(wid)-geometry", context: window.debugId, pid: window.application.pid) { [weak window] in
-                guard let window else { return }
-                // we reuse existing code, to update .isFullscreen, as if there was a kAXWindowResizedNotification
-                try AccessibilityEvents.handleEventWindow(kAXWindowResizedNotification, wid, window.application.pid, axUiElement)
-            }
-        }
-    }
-
     static func voiceOverWindow(_ windowIndex: Int = (SwitcherSession.current?.selectedIndex ?? 0)) {
         // 仅 VoiceOver 开启时才需要把 tile 设为 firstResponder 供朗读；否则每次选中变化都白排一个
         // 10ms asyncAfter + makeFirstResponder（会走 AppKit key-view-loop，注释里也说拖慢 show）。
@@ -78,17 +93,30 @@ class Windows {
     static func updatesBeforeShowing() -> Bool {
         if MissionControl.state() == .showAllWindows || MissionControl.state() == .showFrontWindows { return false }
         if list.isEmpty { return true }
-        // Space/screen membership is refreshed OFF the hot path now (#5721): reactively on Space/screen
-        // change (SpacesEvents/ScreensEvents), and after show in `Applications.syncSpacesState`. Here we
+        // Space/screen membership is refreshed OFF the hot path now (#5721): reactively on Space change
+        // (WindowServerEvents) and screen change (ScreensEvents), and after show in
+        // `Applications.syncSpacesState`. Here we
         // only read the cached values, so there is no blocking SkyLight IPC on the way to rendering. A
         // one-frame staleness (e.g. a window just dragged to another Space) self-corrects via the deferred
-        // reconcile. `recomputeIsPhantom` is kept here: it's pure (no IPC) and reads the cached `spaceIds`.
+        // reconcile. `isPhantom` is DERIVED at read (pure, no IPC — cached `spaceIds` + the CGS latch), so
+        // there is nothing to recompute here.
+        // ...with ONE exception: a summon can land inside a Space transition, before the leading-edge
+        // re-read (`WindowEventReducer.spaceTransitionStarted`) ran, or in the gap where it ran but CGS was
+        // still answering with the Space we are leaving. Filtering and sorting against that Space is the
+        // whole of #5864, and the topology is one CGS round-trip — 0.1ms p50, measured, against a ~110ms
+        // show — so re-read it rather than render a frame we know may be wrong. Only the topology: the
+        // per-window membership fan-out is the expensive part #5721 moved off this path and it stays off.
+        if WindowServerEvents.inSpaceTransition {
+            Spaces.refresh()
+        }
         // Per-shortcut prefs and `exceptions` don't change for the duration of one show, but each
         // computed-property access rebuilds the underlying array via N×`CachedUserDefaults.macroPref`
         // calls. Snapshot them once and pass into the per-window helper.
         let filters = WindowFilters.snapshot()
+        // Tab grouping (incl. fullscreen siblings) and active→inactive state mirroring are reconciled
+        // reactively on WindowServer events (TabGroup.reconcile), so the model is already grouped here —
+        // doing it in this synchronous show path would reorder tiles mid-render (UI jump).
         for window in list {
-            window.recomputeIsPhantom()
             refreshIfWindowShouldBeShownToTheUser(window, filters)
         }
         refreshWhichWindowsToShowTheUser()
@@ -165,6 +193,44 @@ class Windows {
     /// selection + hover methods (all operate on `SwitcherSession.current`)
     //////////////////////////////
 
+    /// One-line dump of the switcher's tiles in list order + the selected index — the single most
+    /// useful signal for the tab-detection race (a stray 2nd tile, a tile that appears/vanishes across two
+    /// dumps, a selected index on the wrong tile). Debug level. `*` marks the selected tile;
+    /// `+` shown / `-` hidden; per tile: app, wid, `t`abbed / `p`hantom / `h`eld / `w`indowless-placeholder /
+    /// `F`ocused flags, size, and spaceIds.
+    /// Size is logged because tab grouping keys on it — without it a capture can't be replayed into the
+    /// `RealWorldScenariosTests` corpus without inventing frames.
+    ///
+    /// `w` and `F` earn their place from #5849, where both had to be DEDUCED from a capture. A windowless
+    /// placeholder was only recognizable by its missing wid, so an app showing a real tile AND a placeholder
+    /// (the "Slack appears twice" bug) read as two ordinary windows. And the bug itself was a window flagged
+    /// phantom while the user was looking at it — a contradiction invisible here until `F` and `p` could be
+    /// read on the same line.
+    static func logTileDump(_ context: String) {
+        guard Logger.debugEnabled else { return }
+        let selected = SwitcherSession.current?.selectedIndex ?? -1
+        let frontmostPid = Applications.frontmostPid
+        let tiles = list.enumerated().map { (i, w) -> String in
+            let held = w.cgWindowId.map { windowsHeldVisibleForTab.contains($0) } ?? false
+            let focused = w.application.pid == frontmostPid && w.application.focusedWindow === w
+            let flags = "\(w.isTabbed ? "t" : "")\(w.isPhantom ? "p" : "")\(w.isFullscreen ? "f" : "")\(held ? "h" : "")\(w.isWindowlessApp ? "w" : "")\(focused ? "F" : "")"
+            let app = w.application.runningApplication.localizedName ?? "?"
+            let frame = w.size.map { "\(Int($0.width))x\(Int($0.height))@\(Int(w.position?.x ?? 0)),\(Int(w.position?.y ?? 0))" } ?? "-"
+            // ax=<hash of the AXUIElement>: is the accessibility element STABLE when Finder mints a new wid
+            // for a tab switch? In AX terms a tabbed window is ONE AXWindow containing an AXTabGroup, while
+            // AltTab's "one tab, one window" model comes from CGS wids — so the element may well outlive the
+            // wid. If it does, it is a real identity to re-link a minted tab to its group, which geometry
+            // cannot do once every window in the cluster is screen-sized. Diagnostic only.
+            let ax = w.axUiElement.map { String(CFHash($0) % 100000) } ?? "-"
+            return "\(i == selected ? "*" : "")\(shouldDisplay(w) ? "+" : "-")\(i):\(app)#\(w.cgWindowId ?? 0)ax\(ax)\(flags.isEmpty ? "" : "(\(flags))")\(frame)sp\(w.spaceIds)"
+        }
+        // `space=` is the Space the tiles below were filtered and sorted AGAINST, at the instant of this
+        // render. Without it a capture cannot tell a wrong list from a right list judged against the Space
+        // the user had just left, which is the whole of #5864 and what the QA Space tests assert on.
+        Logger.debug { "show[\(context)] sel=\(selected) space=\(Spaces.currentSpaceId) "
+            + "tiles=\(tiles.joined(separator: " "))" }
+    }
+
     static func selectedWindow() -> Window? {
         guard let session = SwitcherSession.current, list.count > session.selectedIndex else { return nil }
         let window = list[session.selectedIndex]
@@ -180,9 +246,9 @@ class Windows {
             updateSelectedAndHoveredWindowIndex(list.firstIndex(where: { shouldDisplay($0) }) ?? 0)
             return
         }
-        let snapshot = selectionSnapshot()
-        let inputs = makeSelectionInputs(snapshot, session: session)
+        let inputs = selectionInputs(session)
         let pickIndex = SelectionResolver.initialPickIndex(inputs)
+        Logger.debug { "select initialPick=\(pickIndex.map(String.init) ?? "nil") useLastFocusedRule=\(inputs.useLastFocusedRule) visible=\(inputs.list.indices.filter { inputs.list[$0].visible }) newcomers=\(inputs.list.indices.filter { inputs.list[$0].appearedAfterSummon }) visibleAtSummon=\(inputs.visibleCountAtSummon)" }
         resetForInitialPick(session)
         if let idx = pickIndex {
             updateSelectedAndHoveredWindowIndex(idx)
@@ -191,34 +257,64 @@ class Windows {
 
     static func updateSelectedWindow() {
         guard let session = SwitcherSession.current else { return }
-        let snapshot = selectionSnapshot()
-        let inputs = makeSelectionInputs(snapshot, session: session)
+        let inputs = selectionInputs(session)
         let decision = SelectionResolver.decide(inputs)
+        Logger.debug { "select decide=\(decision) fromTarget=\(session.selectedTarget ?? "nil") sel=\(session.selectedIndex)" }
         shouldRestoreDefaultSelectionOnSearchClear = false
         shouldSelectBestMatchOnSearchChange = false
         applySelectionDecision(decision, session: session)
     }
 
-    /// Project `list` into the kernel's window view (just the fields selection needs).
-    private static func selectionSnapshot() -> [SelectionWindow] {
-        list.map {
-            SelectionWindow(id: $0.id,
-                            visible: shouldDisplay($0),
-                            lastFocusOrder: $0.lastFocusOrder,
-                            isMinimized: $0.isMinimized,
-                            isWindowlessApp: $0.isWindowlessApp)
-        }
-    }
-
-    private static func makeSelectionInputs(_ snapshot: [SelectionWindow], session: SwitcherSession) -> SelectionInputs {
-        SelectionInputs(
+    /// The kernel's view of this refresh, plus the one measurement that has to be taken on the FIRST one:
+    /// how long the visible list was at the summon. It is read here rather than at the press because it needs
+    /// `updatesBeforeShowing()`'s filtering to have run — and both happen in the same main-thread turn as the
+    /// press, so no event can land in between and shift the count.
+    private static func selectionInputs(_ session: SwitcherSession) -> SelectionInputs {
+        let snapshot = selectionSnapshot()
+        let visibleCountAtSummon = session.visibleWindowCountAtSummon ?? snapshot.filter { $0.visible }.count
+        session.visibleWindowCountAtSummon = visibleCountAtSummon
+        return SelectionInputs(
             list: snapshot,
             selectedIndex: session.selectedIndex,
             selectedTarget: session.selectedTarget,
             useLastFocusedRule: Applications.frontmostPid != nil
                 && Preferences.windowOrder[session.shortcutIndex] != .recentlyFocused,
+            visibleCountAtSummon: visibleCountAtSummon,
+            userPickedSelection: session.userPickedSelection,
             restoreDefaultOnSearchClear: shouldRestoreDefaultSelectionOnSearchClear,
-            bestMatchOnSearchChange: shouldSelectBestMatchOnSearchChange)
+            bestMatchOnSearchChange: shouldSelectBestMatchOnSearchChange,
+            currentWindowIsDrawn: currentWindowIsDrawn())
+    }
+
+    /// Is the window the user is on among the drawn tiles? Asked of the APP, not of the window: if any tile
+    /// belongs to the frontmost app then the window they are looking at is either that tile or one the
+    /// filters kept out for a reason of its own, and either way the front of the list is not the window they
+    /// want to land on. Only when no tile at all belongs to the frontmost app is it certain the current
+    /// window is missing from the list — which is exactly what `Non-active apps` does on purpose (#5941).
+    ///
+    /// Asking the app rather than `application.focusedWindow` is deliberate: that AX read can be stale or
+    /// nil, and answering `false` while the user's window IS drawn would make the default select the window
+    /// they are already on. The app-level question cannot fail that way.
+    ///
+    /// No frontmost app (nothing active, or AltTab launched into an empty front) means nothing is being
+    /// filtered against it either, so the ordinary rule applies.
+    private static func currentWindowIsDrawn() -> Bool {
+        guard let frontmostPid = Applications.frontmostPid else { return true }
+        return list.contains { $0.application.pid == frontmostPid && shouldDisplay($0) }
+    }
+
+    /// Project `list` into the kernel's window view (just the fields selection needs).
+    private static func selectionSnapshot() -> [SelectionWindow] {
+        // No session (a CLI read) means nothing is a newcomer, hence the `?? true` fallback below.
+        let presentAtSummon = SwitcherSession.current?.windowIdsAtSummon
+        return list.map {
+            SelectionWindow(id: $0.id,
+                            visible: shouldDisplay($0),
+                            lastFocusOrder: $0.lastFocusOrder,
+                            isMinimized: $0.isMinimized,
+                            isWindowlessApp: $0.isWindowlessApp,
+                            appearedAfterSummon: !(presentAtSummon?.contains($0.id) ?? true))
+        }
     }
 
     private static func applySelectionDecision(_ decision: SelectionDecision, session: SwitcherSession) {
@@ -246,6 +342,7 @@ class Windows {
         let oldIndex = session.selectedIndex
         session.selectedIndex = 0
         session.selectedTarget = nil
+        session.userPickedSelection = false
         TilesView.highlight(oldIndex)
         if let oldHovered = session.hoveredIndex {
             session.hoveredIndex = nil
@@ -258,6 +355,7 @@ class Windows {
         guard newIndex >= 0 && newIndex < list.count else { return }
         guard shouldDisplay(list[newIndex]) else { return }
         var index: Int?
+        if fromMouse { session.userPickedSelection = true }
         if fromMouse && (newIndex != session.hoveredIndex || lastWindowActivityType == .focus) {
             let oldIndex = session.hoveredIndex
             session.hoveredIndex = newIndex
@@ -277,19 +375,26 @@ class Windows {
             session.selectedTarget = list[newIndex].id
             TilesView.highlight(oldIndex)
             WindowThumbnails.previewSelectedIfNeeded()
+            WindowThumbnails.fetchPreviewFrames()
             index = session.selectedIndex
             lastWindowActivityType = .focus
         }
         guard let index else { return }
         TilesView.highlight(index)
-        let focusedView = TilesView.recycledViews[index]
-        TilesView.scrollView.contentView.scrollToVisible(focusedView.frame)
+        // keyboard/programmatic selection scrolls the target into view; mouse hover must NOT, or hovering a
+        // partially-clipped edge tile yanks the whole list — the accidental "edge scroll". Mouse users scroll
+        // with the wheel/trackpad instead.
+        if !fromMouse {
+            let focusedView = TilesView.recycledViews[index]
+            TilesView.scrollView.contentView.scrollToVisible(focusedView.frame)
+        }
         voiceOverWindow(index)
     }
 
     static func cycleSelectedWindowIndex(_ step: Int, allowWrap: Bool = true) {
         guard let session = SwitcherSession.current else { return }
         guard list.contains(where: { shouldDisplay($0) }) else { return }
+        session.userPickedSelection = true  // from here the selection is the USER's pick, not the default
         // removeWindows 收缩 list 时不同步修正 session.selectedIndex（要等节流的 refreshOpenUiAfterExternalEvent
         // 才纠正），这中间若来一次 trackpad/键盘 cycle，selectedIndex 可能 >= list.count → 裸下标崩溃。此处夹紧。
         let currentIndex = max(0, min(session.selectedIndex, list.count - 1))
@@ -302,6 +407,29 @@ class Windows {
             return
         }
         updateSelectedAndHoveredWindowIndex(nextIndex)
+    }
+
+    /// The selected window plus up to `radius` displayed windows on each side in cycling order (wrapping
+    /// like Tab does). These are the windows the Preview panel may imminently show, so they are the only
+    /// ones worth capturing at full resolution (#5861); quick Tab presses land on a pre-captured neighbor.
+    static func selectedNeighborhoodIds(_ radius: Int = 2) -> Set<CGWindowID> {
+        guard let session = SwitcherSession.current, session.selectedIndex < list.count else { return [] }
+        var ids = Set<CGWindowID>()
+        if let wid = list[session.selectedIndex].cgWindowId { ids.insert(wid) }
+        for step in [1, -1] {
+            var index = session.selectedIndex
+            var found = 0
+            var iterations = 0
+            while found < radius && iterations < list.count {
+                index = (index + step + list.count) % list.count
+                iterations += 1
+                if shouldDisplay(list[index]) {
+                    found += 1
+                    if let wid = list[index].cgWindowId { ids.insert(wid) }
+                }
+            }
+        }
+        return ids
     }
 
     static func selectedWindowIndexAfterCycling(_ step: Int) -> Int {
@@ -317,60 +445,22 @@ class Windows {
         return targetIndex
     }
 
-    /// 预览预取：返回当前选中窗口在导航顺序上前后各 radius 个「可显示」窗口（去重、不含选中本身、不含 windowless）。
-    /// 给这些相邻窗口提前补全分辨率截图，使快速连切到相邻窗口时预览已就绪、不再瞬间模糊。
-    /// 步进/跳过不可显示/绕回的规则与 selectedWindowIndexAfterCycling 一致，确保与方向键实际切换顺序对齐。
-    static func neighborWindowsForPreviewPrefetch(_ radius: Int = 2) -> [Window] {
-        guard let session = SwitcherSession.current, list.contains(where: { shouldDisplay($0) }) else { return [] }
-        let count = list.count
-        let currentIndex = max(0, min(session.selectedIndex, count - 1))
-        var result = [Window]()
-        var seen = Set<CGWindowID>()
-        if let selectedWid = list[currentIndex].cgWindowId { seen.insert(selectedWid) }
-        for step in [1, -1] {
-            var index = currentIndex
-            var found = 0
-            var iterations = 0
-            while found < radius && iterations < count {
-                iterations += 1
-                let next = (index + step) % count
-                index = next < 0 ? count + next : next
-                if index == currentIndex { break }
-                let window = list[index]
-                guard shouldDisplay(window) else { continue }
-                found += 1
-                if let wid = window.cgWindowId, !window.isWindowlessApp, !seen.contains(wid) {
-                    seen.insert(wid)
-                    result.append(window)
-                }
-            }
-        }
-        return result
-    }
-
     /// lastFocusOrder methods
     //////////////////////////////
 
-    /// Seeds "lastFocusOrder" from window z-order (top-most first) on the first summon, so the initial MRU
-    /// order reflects screen stacking before any focus events arrive. The z-order query is a blocking CGS
-    /// call, so it runs off-main via CGSCallScheduler (#5721); the list reseed + a refresh land on main when
-    /// it returns. (First-summon-only, so the seed lands a frame after that first show — acceptable.)
+    /// Seeds the MRU from window z-order (top-most first), so the order reflects screen stacking for the
+    /// windows AltTab was not running to watch being focused. The result is applied by the reducer's
+    /// `.zOrderRead` branch, which writes it into the `focusedAt` tiebreak — a real focus is knowledge,
+    /// stacking is a guess, and this used to rewrite EVERY window's rank here instead.
+    ///
+    /// The query BLOCKS, hence the off-main scheduler (#5721), and that is also why it is fired a beat after
+    /// launch and not only on the first summon: called there alone, its answer lands after that summon's
+    /// first render and the user watches the list re-order. Seeded at launch, the first summon's call finds
+    /// nothing to change and the reducer emits no re-render at all; it still runs there, for whatever the
+    /// launch pass could not see yet.
     static func sortByLevel() {
-        CGSCallScheduler.windowsInSpaces(Spaces.visibleSpaces) { wids in
-            var windowLevelMap = [CGWindowID?: Int]()
-            for (index, cgWindowId) in wids.enumerated() {
-                windowLevelMap[cgWindowId] = index
-            }
-            list = list
-            .sorted { w1, w2 in
-                (windowLevelMap[w1.cgWindowId] ?? .max) < (windowLevelMap[w2.cgWindowId] ?? .max)
-            }
-            .enumerated()
-            .map { (index, window) -> Window in
-                window.lastFocusOrder = index
-                return window
-            }
-            if SwitcherSession.isActive { App.refreshOpenUiAfterExternalEvent(Windows.list) }
+        CGSCallScheduler.windowsInSpaces(Spaces.visibleSpaces) { wids in   // `thenMain`: already on main
+            TrackedWindowStateBridge.dispatch(.zOrderRead(widsTopFirst: wids))
         }
     }
 
@@ -418,36 +508,16 @@ class Windows {
         }
     }
 
-    static func getLastFocusedOrderWindowIndex() -> Int? {
-        var index: Int? = nil
-        var lastFocusOrderMin = Int.max
-        for (offset, w) in list.enumerated() {
-            if !w.isWindowlessApp && shouldDisplay(w) && w.lastFocusOrder < lastFocusOrderMin {
-                lastFocusOrderMin = w.lastFocusOrder
-                index = offset
-            }
-        }
-        return index
-    }
-
-    static func updateLastFocusOrder(_ focusedWindow: Window) -> [Window]? {
-        // no need to update the list is the window is already lastFocusOrder 0
-        guard focusedWindow.lastFocusOrder != 0 && list.count > 1, let previousFocus = (list.first { $0.lastFocusOrder == 0 }) else { return [focusedWindow] }
-        // 2 windows have recently changed: the one which got focused, and the one who just lost focus
-        let windowsToRefresh = [focusedWindow, previousFocus]
-        let focusedWindowOldFocusOrder = focusedWindow.lastFocusOrder
-        list.forEach {
-            if $0.lastFocusOrder == focusedWindowOldFocusOrder {
-                $0.lastFocusOrder = 0
-            } else if $0.lastFocusOrder < focusedWindowOldFocusOrder {
-                $0.lastFocusOrder += 1
-            }
-        }
-        return windowsToRefresh
-    }
-
     static func findOrCreate(_ windowAxUiElement: AXUIElement, _ wid: CGWindowID, _ app: Application, _ level: CGWindowLevel, _ title: String?, _ subrole: String?, _ role: String?, _ size: CGSize?, _ position: CGPoint?, _ isFullscreen: Bool?, _ isMinimized: Bool?) -> (Window?, Bool) {
         if let window = byWindowId[wid] ?? (list.first { $0.isEqualRobust(windowAxUiElement, wid) }) {
+            // Adopt the freshest element for this wid. Some apps (e.g. Zoom meeting windows) silently rebuild a
+            // window's accessibility element while keeping the same CGWindowID, with no destroyed notification,
+            // so our cached ref goes stale and every AX call returns kAXErrorInvalidUIElement. Rebinding here
+            // heals it on the sync points that already hand us a fresh element: every show (discovery
+            // re-acquires the element), app activation (kAXFocusedWindowAttribute), and focus notifications (#5586).
+            if window.axUiElement != windowAxUiElement {
+                window.rebindAxElement(windowAxUiElement)
+            }
             // on any window event, we take the opportunity to refresh all window attributes
             window.updateFromAxAttributes(title, size, position, isFullscreen, isMinimized)
             return (window, false)
@@ -463,6 +533,10 @@ class Windows {
         list.append(window)
         if let wid = window.cgWindowId {
             byWindowId[wid] = window
+            WindowServerEvents.subscribe(wid)
+            // The freshly-created-window MRU promotion (consuming `windowsPendingFocusPromotion` /
+            // `recentlyCreatedWindows`) lives in the reducer's `.discoveryLanded` branch now — every tracked
+            // append flows through it.
         }
         if list.count > TilesView.recycledViews.count {
             TilesView.recycledViews.append(TileView())
@@ -494,6 +568,13 @@ class Windows {
             }
             if let wid = w.cgWindowId {
                 byWindowId.removeValue(forKey: wid)
+                windowsPendingFocusPromotion.removeValue(forKey: wid)
+                recentlyCreatedWindows.remove(wid)
+                windowsPendingSpaceRemoval.removeValue(forKey: wid)
+                windowsHeldVisibleForTab.remove(wid)
+                // deliberately no `WindowServerEvents.unsubscribe`: leaving the model doesn't mean the wid is
+                // gone from the WindowServer, and a wid that comes back only announces itself through the
+                // per-window events that opt-in carries.
             }
         }
         let toRemove = windows.map { $0.lastFocusOrder }
@@ -519,21 +600,13 @@ class Windows {
         for w in windows {
             if let wid = w.cgWindowId {
                 AXCallScheduler.shared.removeEntries(withPrefix: "wid-\(wid)-")
-                // one-shot subscription keys (see Window.observeEvents) use the `sub-win-` prefix, so the
-                // `wid-` cleanup above misses them; strip them here too or they leak 6 entries per window.
-                AXCallScheduler.shared.removeEntry(key: "sub-win-\(wid)")
-                AXCallScheduler.shared.removeEntries(withPrefix: "sub-win-\(wid)-")
                 Applications.windowAttributesThrottler.removeEntries(withPrefix: "\(wid)-")
                 Applications.screenshotThrottler.removeEntry(withKey: "capture-wid-\(wid)")
                 Applications.screenshotThrottler.removeEntry(withKey: "capture-wid-\(wid)-fullRes")
             }
-            // Detach the per-window AX observer's runloop source. Without this the AX events
-            // thread's runloop accumulates one orphaned source per window-ever-opened (leak #1,
-            // dominant cause of the 399 GB VM growth in long sessions).
-            w.releaseAxObserver()
-            // when a tabbed window is removed, update its former siblings' tab group
-            if let siblingWids = w.tabbedSiblingWids {
-                TabGroup.removedWindowFromGroup(wid: w.cgWindowId, siblingWids: siblingWids)
+            // when a tabbed window is removed, its group shrinks (or dissolves) in the registry
+            if let wid = w.cgWindowId {
+                TabGroups.remove(wid, reason: "windowRemoved")
             }
         }
         if addWindowlessWindowIfNeeded {

@@ -1,6 +1,86 @@
 import Cocoa
 
+/// THE single owner of tab-group membership — the write funnel every grouping mutation goes through.
+///
+/// Membership is NORMALIZED here, and `Window.isTabbed` / `tabbedSiblingWids` are DERIVED reads over it —
+/// never storage, and never written from anywhere else. A wid belongs to AT MOST one group, a group always
+/// has ≥ 2 members and exactly ONE representative (the member it shows). Storing membership per-window
+/// instead makes a whole bug class REPRESENTABLE rather than merely detected-and-repaired: two groups
+/// claiming one window, members disagreeing on their links, the focused window flagged tabbed and hidden
+/// with nothing to correct it (rec8/10). Every mutation logs one line, so "who tabbed this window?" is one
+/// grep. Main-thread only, like the `Windows` model it annotates.
+///
+/// The tables and mutation semantics live in the pure `TabGroupsTable` (shared with `TrackedWindowState`, so the
+/// event-replay reducer and the live model run ONE implementation); this class binds them to the live
+/// world — `TabGroupResolver` re-picks over live snapshots, the log lines.
+///
+/// Nearly every mutation now happens inside the reducer and arrives here as a whole table (`replace`). The
+/// one exception is `remove`, called from `Windows.removeWindows`: the reducer asks the shell to drop a
+/// window and never sees the shortened list until the next snapshot, so the group shrink has to happen live.
+class TabGroups {
+    private(set) static var table = TabGroupsTable()
+
+    /// groupId → ordered member wids (order = AX title order / geometry order; ≥ 2 by construction)
+    static var membersByGroup: [Int: [CGWindowID]] { table.membersByGroup }
+    /// groupId → the member the group shows (its active tab). Every group has exactly one.
+    static var representativeByGroup: [Int: CGWindowID] { table.representativeByGroup }
+
+    static func groupId(of wid: CGWindowID) -> Int? { table.groupId(of: wid) }
+
+    static func siblingWids(of wid: CGWindowID) -> [CGWindowID]? { table.siblingWids(of: wid) }
+
+    static func isTabbed(_ wid: CGWindowID) -> Bool { table.isTabbed(wid) }
+
+    /// Does this group have a CLAIM TO THE SCREEN — a member on some Space, or one held through a tab swap?
+    /// The phantom exemption for group members rides on this: a live group's background tabs are legitimately
+    /// Space-less and its representative must show, but a group whose EVERY member is Space-less is dead
+    /// remains (Finder retains destroyed tab windows), and exempting those kept a ghost tile visible forever
+    /// and shielded the corpses from the dead-window sweep (rec22).
+    static func hasScreenClaim(_ gid: Int) -> Bool {
+        table.hasScreenClaim(gid) { wid in
+            !(Windows.byWindowId[wid]?.spaceIds.isEmpty ?? true) || Windows.windowsHeldVisibleForTab.contains(wid)
+        }
+    }
+
+    /// Take `wid` out of its group: the window was destroyed. Its group shrinks; with ≤ 1 member left it
+    /// dissolves (a single window can't be a tab group). A member that leaves KEEPS the Space its group lent
+    /// it, still marked borrowed — see `Window.spaceIsBorrowed` for why stripping it hid live windows.
+    static func remove(_ wid: CGWindowID, reason: String) {
+        var t = table
+        let m = t.remove(wid, reason: reason, repPicker: repPicker)
+        table = t
+        for line in m.logs { Logger.debug { line } }
+    }
+
+    /// Adopt the tables a reducer pass computed (`TrackedWindowStateBridge.apply`). The reducer already
+    /// returned the log lines as effects, so this is a plain swap.
+    static func replace(_ newTable: TabGroupsTable) {
+        table = newTable
+    }
+
+    /// Re-pick a shrunk group's representative — the kernel decides, over snapshots taken against the
+    /// MID-MUTATION tables (the shrunk member list is already written, so the links are coherent), and its
+    /// focused-member rule recovers a group whose visible was stolen.
+    ///
+    /// Goes through the SAME projection the reducer uses (`TrackedWindowState.tabWindow`), assembled from a
+    /// minimal state holding just these windows and the mid-mutation table. Never add a live-only second copy
+    /// of that projection: one drifted here silently, forwarding neither `lastLeftSpaceId` nor the handover
+    /// edge, so the live model and the replayed one handed a kernel different facts. The synthetic-fact rule
+    /// (rec14/15/20/21) is only a rule if there is one place to break it.
+    private static func repPicker(_ remaining: [CGWindowID], _ mid: TabGroupsTable) -> CGWindowID? {
+        var state = TrackedWindowState()
+        state.groups = mid
+        state.held = Windows.windowsHeldVisibleForTab
+        state.windows = remaining.compactMap { Windows.byWindowId[$0] }.map { TrackedWindowStateBridge.modelWindow($0) }
+        return TabGroupResolver.groupRepresentative(state.windows.map { state.tabWindow($0) })
+    }
+}
+
+/// What is left of the impure OS-tab adapter, now that the orchestration lives in `WindowEventReducer` and
+/// the `Window` ⇄ `TabWindow` projection lives in `TrackedWindowState`: two live reads with nowhere better
+/// to be. See `TabGroupResolverSpecs.md` for the decision logic and its scenarios.
 class TabGroup {
+
     /// Parse AXTabGroup children from a prior `.attributes([..., kAXChildrenAttribute])` call.
     /// Returns tab titles if the window has tabs (always >= 2), nil otherwise.
     static func extractTabTitles(_ children: [AXUIElement]?) -> [String]? {
@@ -17,114 +97,5 @@ class TabGroup {
             }
         }
         return nil
-    }
-
-    /// When a window is removed from the list, update its former siblings' tab group.
-    /// If only 1 sibling remains, clear its tab state (a single window can't be tabbed).
-    static func removedWindowFromGroup(wid: CGWindowID?, siblingWids: [CGWindowID]) {
-        let remainingWids = siblingWids.filter { $0 != wid }
-        let remainingSiblings = remainingWids.compactMap { Windows.byWindowId[$0] }
-        if remainingSiblings.count <= 1 {
-            // no longer a tab group
-            for s in remainingSiblings {
-                s.tabbedSiblingWids = nil
-                s.isTabbed = false
-            }
-        } else {
-            // shrink the group
-            for s in remainingSiblings {
-                s.tabbedSiblingWids = remainingWids
-            }
-        }
-    }
-
-    /// Update tab state for a window and its siblings using AX-discovered tab titles.
-    /// Resolves titles to WIDs, propagates space info from active to inactive tabs,
-    /// and clears stale state on windows no longer in the group.
-    /// Returns true if any window's tab state or space changed.
-    @discardableResult
-    static func updateState(_ activeTab: Window, _ siblingTitles: [String]?) -> Bool {
-        var changed = false
-        guard let titles = siblingTitles else {
-            // inactive tabs report nil titles (no AXTabGroup child) but are still tabbed,
-            // so we only act when this was the active tab of its group (i.e. !isTabbed).
-            // when an active tab becomes standalone (drag-out), we must also reconcile
-            // former siblings — they receive no AX event of their own.
-            if !activeTab.isTabbed, let oldSiblings = activeTab.tabbedSiblingWids {
-                let activeWid = activeTab.cgWindowId
-                let remainingWids = oldSiblings.filter { $0 != activeWid }
-                let remainingSiblings = remainingWids.compactMap { wid -> Window? in
-                    guard let w = Windows.byWindowId[wid], w !== activeTab else { return nil }
-                    return w
-                }
-                if remainingSiblings.count <= 1 {
-                    for s in remainingSiblings where s.isTabbed || s.tabbedSiblingWids != nil {
-                        s.tabbedSiblingWids = nil
-                        s.isTabbed = false
-                        s.recomputeIsPhantom()
-                        changed = true
-                    }
-                } else {
-                    for s in remainingSiblings where s.tabbedSiblingWids != remainingWids {
-                        s.tabbedSiblingWids = remainingWids
-                        s.recomputeIsPhantom()
-                        changed = true
-                    }
-                }
-                activeTab.tabbedSiblingWids = nil
-                changed = true
-            }
-            return changed
-        }
-        let pid = activeTab.application.pid
-        var siblingWids = [CGWindowID]()
-        if let wid = activeTab.cgWindowId { siblingWids.append(wid) }
-        var matchedSiblings = [Window]()
-        // remove one occurrence of the active tab's title (not all — there may be duplicate titles)
-        var remainingTitles = titles
-        if let i = remainingTitles.firstIndex(of: activeTab.title) {
-            remainingTitles.remove(at: i)
-        }
-        for title in remainingTitles {
-            if let sibling = (Windows.list.first { s in
-                s !== activeTab && s.application.pid == pid && s.title == title
-                    && !matchedSiblings.contains(where: { $0 === s })
-                    && positionsCompatibleForTabSiblings(activeTab, s)
-            }) {
-                matchedSiblings.append(sibling)
-                if let wid = sibling.cgWindowId { siblingWids.append(wid) }
-            }
-        }
-        if activeTab.tabbedSiblingWids != siblingWids { changed = true }
-        activeTab.tabbedSiblingWids = siblingWids
-        activeTab.isTabbed = false
-        activeTab.recomputeIsPhantom()
-        for sibling in matchedSiblings {
-            if !sibling.isTabbed || sibling.tabbedSiblingWids != siblingWids || sibling.spaceIds != activeTab.spaceIds { changed = true }
-            sibling.tabbedSiblingWids = siblingWids
-            sibling.isTabbed = true
-            sibling.spaceIds = activeTab.spaceIds
-            sibling.spaceIndexes = activeTab.spaceIndexes
-            sibling.isOnAllSpaces = activeTab.isOnAllSpaces
-            sibling.recomputeIsPhantom()
-        }
-        for window in Windows.list where window !== activeTab && window.application.pid == pid
-                && !matchedSiblings.contains(where: { $0 === window }) {
-            if window.tabbedSiblingWids != nil {
-                window.tabbedSiblingWids = nil
-                window.isTabbed = false
-                window.recomputeIsPhantom()
-                changed = true
-            }
-        }
-        return changed
-    }
-
-    /// Tabs of one window share the parent's geometry. If both positions are known and differ
-    /// noticeably, the candidate is no longer in the same window (likely dragged out).
-    /// When either position is unknown (e.g. an inactive tab not yet focused), fall back to title match.
-    private static func positionsCompatibleForTabSiblings(_ a: Window, _ b: Window) -> Bool {
-        guard let pa = a.position, let pb = b.position else { return true }
-        return abs(pa.x - pb.x) < 50 && abs(pa.y - pb.y) < 50
     }
 }
