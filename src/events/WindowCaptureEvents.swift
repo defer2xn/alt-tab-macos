@@ -1,6 +1,34 @@
 import Cocoa
 import ScreenCaptureKit
 
+private struct WindowCaptureKey: Hashable {
+    let wid: CGWindowID
+    let fullRes: Bool
+}
+
+private enum WindowCaptureInFlight {
+    private static let captures = ConcurrentMap<WindowCaptureKey, Bool>()
+
+    static func acquire(_ key: WindowCaptureKey) -> Bool {
+        captures.withLock { captures in
+            guard captures[key] == nil else { return false }
+            captures[key] = true
+            return true
+        }
+    }
+
+    static func release(_ key: WindowCaptureKey) {
+        captures.withLock { $0[key] = nil }
+    }
+}
+
+private func shouldExecuteQueuedWindowCapture() -> Bool {
+    WindowCapturePolicy.shouldCapture(
+        userAllowsBackground: Preferences.captureWindowsInBackground,
+        switcherIsActive: SwitcherSession.isActive,
+        osMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+}
+
 @available(macOS 14.0, *)
 class WindowCaptureScreenshots {
     // SCShareableContent.getExcludingDesktopWindows is expensive for the OS; we cache as much as possible.
@@ -108,18 +136,21 @@ class WindowCaptureScreenshots {
         let throttleKey = fullRes ? "capture-wid-\(scWindow.windowID)-fullRes" : "capture-wid-\(scWindow.windowID)"
         // [weak window] avoids keeping a closed Window alive while the capture is queued or in-flight with the OS
         Applications.screenshotThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
-            guard !App.isTerminating, !ScreenLockEvents.isScreenLocked, let window else { return }
+            let captureKey = WindowCaptureKey(wid: scWindow.windowID, fullRes: fullRes)
+            guard shouldExecuteQueuedWindowCapture(), !App.isTerminating, !ScreenLockEvents.isScreenLocked, let window,
+                  WindowCaptureInFlight.acquire(captureKey) else { return }
             let config = SCStreamConfiguration.forWindow(scWindow, size, scaleFactor, false, fullRes)
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
             ActiveWindowCaptures.increment()
             SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { [weak window] sampleBuffer, error in
                 ActiveWindowCaptures.decrement()
+                WindowCaptureInFlight.release(captureKey)
                 guard let window else { return }
                 guard let sampleBuffer, error == nil else { Logger.error { "\(window.debugId) \(sampleBuffer == nil) \(error)" }; return }
-                guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                 guard let pixelBuffer = sampleBuffer.pixelBuffer() ?? sampleBuffer.imageBuffer else { Logger.error { "\(window.debugId) no pixelBuffer" }; return }
                 DispatchQueue.main.async {
-                    guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                    guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                     window.refreshThumbnail(.pixelBuffer(pixelBuffer), fullRes)
                 }
             }
@@ -151,11 +182,14 @@ class WindowCaptureScreenshotsPrivateApi {
             let isPrioritized = prioritized.contains(wid)
             let throttleKey = fullRes ? "capture-wid-\(wid)-fullRes" : "capture-wid-\(wid)"
             Applications.screenshotThrottler.throttleOrProceed(key: throttleKey, queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
-                guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
-                guard let window, let cgImage = oneTimeCapture(wid, fullRes) else { return }
-                guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                let captureKey = WindowCaptureKey(wid: wid, fullRes: fullRes)
+                guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive,
+                      let window, WindowCaptureInFlight.acquire(captureKey) else { return }
+                defer { WindowCaptureInFlight.release(captureKey) }
+                guard let cgImage = oneTimeCapture(wid, fullRes) else { return }
+                guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                 DispatchQueue.main.async { [weak window] in
-                    guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                    guard shouldExecuteQueuedWindowCapture(), source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                     window?.refreshThumbnail(.cgImage(cgImage), fullRes)
                 }
             }

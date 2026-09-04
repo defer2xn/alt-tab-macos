@@ -25,4 +25,9 @@ enum WindowCapturePolicy {
     static func shouldCaptureWindow(showsThumbnails: Bool, isPreviewTarget: Bool) -> Bool {
         showsThumbnails || isPreviewTarget
     }
+
+    static func shouldScheduleAdditionalCapture(windowId: UInt32?, alreadyScheduled: Set<UInt32>) -> Bool {
+        guard let windowId else { return true }
+        return !alreadyScheduled.contains(windowId)
+    }
 }

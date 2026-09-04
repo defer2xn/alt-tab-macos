@@ -311,7 +311,7 @@ class App: AppCenterApplication {
         }
     }
 
-    static func refreshUi(_ preserveScrollPosition: Bool = false) {
+    static func refreshUi(_ preserveScrollPosition: Bool = false, refreshPreview: Bool = true) {
         guard SwitcherSession.isActive else { return }
         let preservedScrollOrigin = preserveScrollPosition ? TilesView.currentScrollOrigin() : nil
         Windows.updateSelectedWindow()
@@ -319,8 +319,10 @@ class App: AppCenterApplication {
         TilesPanel.shared.updateContents(preservedScrollOrigin)
         guard SwitcherSession.isActive else { return }
         Windows.voiceOverWindow() // at this point TileViews are assigned to the window, and ready
-        guard SwitcherSession.isActive else { return }
-        WindowThumbnails.previewSelectedIfNeeded()
+        if refreshPreview {
+            guard SwitcherSession.isActive else { return }
+            WindowThumbnails.previewSelectedIfNeeded()
+        }
     }
 
     static func showUiOrCycleSelection(_ shortcutIndex: Int, _ forceDoNothingOnRelease_: Bool) {
@@ -376,16 +378,19 @@ class App: AppCenterApplication {
         guard SwitcherSession.isActive else { return }
         TilesView.swapBackgroundViewIfNeeded()
         guard SwitcherSession.isActive else { return }
-        refreshUi()
+        refreshUi(false, refreshPreview: false)
         guard SwitcherSession.isActive else { return }
         TilesPanel.shared.show()
-        WindowThumbnails.previewSelectedIfNeeded()
+        let scheduledPreviewWids = WindowThumbnails.previewSelectedIfNeeded()
         if TilesView.isSearchEditing {
             TilesView.enableSearchEditing()
         }
         KeyRepeatTimer.startRepeatingKeyNextWindow()
         let prioritizedIds = TilesView.windowIdsInViewport()
-        WindowThumbnails.refreshAsync(Windows.list, .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: prioritizedIds)
+        let remainingWindows = Windows.list.filter {
+            WindowCapturePolicy.shouldScheduleAdditionalCapture(windowId: $0.cgWindowId, alreadyScheduled: scheduledPreviewWids)
+        }
+        WindowThumbnails.refreshAsync(remainingWindows, .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: prioritizedIds)
     }
 
     static func checkIfShortcutsShouldBeDisabled(_ activeWindow: Window?, _ activeApp: Application?) {

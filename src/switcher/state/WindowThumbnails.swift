@@ -10,7 +10,8 @@ enum WindowThumbnails {
     /// 据此决定哪些截全分辨率、其余截缩略图尺寸。集合上界 = 1 + 2×radius，内存仍受控。主线程读写。
     static var fullResWids = Set<CGWindowID>()
 
-    static func previewSelectedIfNeeded() {
+    @discardableResult
+    static func previewSelectedIfNeeded() -> Set<CGWindowID> {
         let selected: Window?
         if let session = SwitcherSession.current, ScreenRecordingPermission.status == .granted,
            Preferences.effectivePreviewSelectedWindow(session.shortcutIndex),
@@ -24,6 +25,7 @@ enum WindowThumbnails {
         // 其全分辨率已就绪，不必等按需补截，消除瞬间模糊。
         let prefetch = selected != nil ? Windows.neighborWindowsForPreviewPrefetch() : []
         var newFullResWids = Set<CGWindowID>()
+        var scheduledWids = Set<CGWindowID>()
         if let id = newPreviewedWid { newFullResWids.insert(id) }
         for w in prefetch { if let wid = w.cgWindowId { newFullResWids.insert(wid) } }
         if newPreviewedWid != previewedWid || newFullResWids != fullResWids {
@@ -33,6 +35,7 @@ enum WindowThumbnails {
             // 不会回环：refreshThumbnail 只刷新显示、不触发截图。重复请求由 screenshotThrottler 的 -fullRes 键限频去重。
             if let selected, let id = newPreviewedWid {
                 refreshAsync([selected] + prefetch, .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: [id])
+                scheduledWids = newFullResWids
             }
         }
         if let selected, let id = selected.cgWindowId, let thumbnail = selected.thumbnail,
@@ -41,6 +44,7 @@ enum WindowThumbnails {
         } else {
             PreviewPanel.shared.orderOut(nil)
         }
+        return scheduledWids
     }
 
     // dispatch screenshot requests off the main-thread, then wait for completion

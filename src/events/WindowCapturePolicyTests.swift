@@ -31,4 +31,11 @@ final class WindowCapturePolicyTests: XCTestCase {
         XCTAssertTrue(WindowCapturePolicy.shouldCaptureWindow(showsThumbnails: false, isPreviewTarget: true))
         XCTAssertTrue(WindowCapturePolicy.shouldCaptureWindow(showsThumbnails: true, isPreviewTarget: false))
     }
+
+    func testAlreadyScheduledPreviewIsExcludedFromFollowUpCapture() {
+        let scheduled: Set<UInt32> = [11, 22]
+        XCTAssertFalse(WindowCapturePolicy.shouldScheduleAdditionalCapture(windowId: 11, alreadyScheduled: scheduled))
+        XCTAssertTrue(WindowCapturePolicy.shouldScheduleAdditionalCapture(windowId: 33, alreadyScheduled: scheduled))
+        XCTAssertTrue(WindowCapturePolicy.shouldScheduleAdditionalCapture(windowId: nil, alreadyScheduled: scheduled))
+    }
 }
